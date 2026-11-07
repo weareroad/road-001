@@ -8,6 +8,17 @@
 ;   black  = waiting/remaining frame time
 PROFILE_BORDER equ 1
 
+; Temporary milestone: alternate visibly between bank 5 and bank 7.
+; Set to 0 after paging has been verified in the emulator.
+PAGING_TEST equ 1
+
+PAGING_PORT          equ $7ffd
+PAGING_BANK_7        equ %00000111
+PAGING_SHADOW_SCREEN equ %00001000
+PAGING_48K_ROM       equ %00010000
+PAGING_INITIAL       equ PAGING_48K_ROM|PAGING_BANK_7
+SYSTEM_BANKM         equ $5b5c
+
 ; Keep the runtime stack in fixed bank 2 ($8000-$BFFF). The 128K machine
 ; pages different RAM banks into $C000-$FFFF, so the old $FF00 stack would
 ; disappear whenever that upper bank changed.
@@ -49,6 +60,12 @@ savedStackPointer:
 currentShiftOffset:
     db 0
 
+pagingState:
+    db PAGING_INITIAL
+
+flipDelay:
+    db 50
+
 message:
     ; Eight source lines of 32 characters form one continuous message.
     db "WELCOME TO THE ZX SPECTRUM DEMO."
@@ -74,6 +91,8 @@ start:
     ld sp,STACK_TOP
     ld iy,$5c3a           ; Spectrum ROM system-variable base
 
+    call Initialise128Paging
+
     ; Black border.
     xor a
     out ($fe),a
@@ -93,6 +112,11 @@ start:
     ld bc,767
     ld (hl),%00000111
     ldir
+
+    if PAGING_TEST
+        call InitialiseShadowTestScreen
+        jp PagingTestLoop
+    endif
 
     call CopyAndThickenFont
     call BuildShiftedFont
@@ -158,6 +182,85 @@ mainLoop:
     ld (scrollPos),hl
 
     jr mainLoop
+
+; ------------------------------------------------
+; Initialise128Paging
+;
+; Selects the known 48K ROM, maps RAM bank 7 at $C000 and displays the
+; normal bank-5 screen. Bit 5 remains clear so paging is not locked.
+; ------------------------------------------------
+
+Initialise128Paging:
+    ld a,PAGING_INITIAL
+    jp WritePagingState
+
+; ------------------------------------------------
+; WritePagingState
+;
+; Writes the 128K paging latch and keeps both our private copy and the ROM
+; system copy synchronized. The caller is responsible for excluding
+; interrupts while changing the latch.
+;
+; In:       A = complete value for port $7FFD
+; Clobbers: AF, BC
+; ------------------------------------------------
+
+WritePagingState:
+    ld (pagingState),a
+    ld (SYSTEM_BANKM),a
+    ld bc,PAGING_PORT
+    out (c),a
+    ret
+
+; ------------------------------------------------
+; InitialiseShadowTestScreen
+;
+; Bank 7 is mapped at $C000 by Initialise128Paging. Fill its bitmap with
+; a visible stripe pattern and use cyan ink on black paper.
+; ------------------------------------------------
+
+InitialiseShadowTestScreen:
+    ld hl,$c000
+    ld de,$c001
+    ld bc,6143
+    ld (hl),%10101010
+    ldir
+
+    ld hl,$d800
+    ld de,$d801
+    ld bc,767
+    ld (hl),%00000101
+    ldir
+    ret
+
+; ------------------------------------------------
+; PagingTestLoop
+;
+; Alternates bank 5 and bank 7 once per second. The normal screen is blank;
+; the shadow screen contains cyan stripes. This loop is compiled only while
+; PAGING_TEST is non-zero.
+; ------------------------------------------------
+
+PagingTestLoop:
+    im 1
+    ei
+
+.waitFrame:
+    halt
+    ld a,(flipDelay)
+    dec a
+    ld (flipDelay),a
+    jr nz,.waitFrame
+
+    ld a,50
+    ld (flipDelay),a
+
+    ld a,(pagingState)
+    xor PAGING_SHADOW_SCREEN
+    di
+    call WritePagingState
+    ei
+    jr .waitFrame
 
 
 ; ------------------------------------------------
