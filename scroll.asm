@@ -2,9 +2,10 @@
     jp start
 
 ; Set to 1 to show frame-time phases in the border:
-;   yellow = erasing characters at their old positions
-;   red    = drawing the message
-;   black  = remaining frame time
+;   yellow = clearing the off-screen frame buffer
+;   red    = rendering the message into the frame buffer
+;   cyan   = copying the completed buffer to the visible screen
+;   black  = waiting/remaining frame time
 PROFILE_BORDER equ 1
 
 charX:
@@ -64,29 +65,42 @@ start:
     ei
 
 mainLoop:
-    halt
-
     if PROFILE_BORDER
-        ld a,6             ; Yellow: erase phase begins
+        ld a,6             ; Yellow: clear the next frame
         out ($fe),a
     endif
 
-    call EraseMessage
+    call ClearFrameBuffer
 
-    ; Advance the message before drawing its new position.
+    ; Advance and construct the next complete frame off screen.
     ld hl,(scrollPos)
     inc hl
     ld (scrollPos),hl
 
     if PROFILE_BORDER
-        ld a,2             ; Red: draw phase begins
+        ld a,2             ; Red: off-screen rendering begins
         out ($fe),a
     endif
 
-    call DrawMessage
+    call DrawMessageToBuffer
 
     if PROFILE_BORDER
-        xor a              ; Black: rendering is complete
+        xor a              ; Black: frame construction is complete
+        out ($fe),a
+    endif
+
+    ; Keep the old complete frame visible until the next interrupt.
+    halt
+
+    if PROFILE_BORDER
+        ld a,5             ; Cyan: publish the completed frame
+        out ($fe),a
+    endif
+
+    call CopyFrameBufferToScreen
+
+    if PROFILE_BORDER
+        xor a
         out ($fe),a
     endif
 
@@ -318,6 +332,83 @@ DrawMessage:
     inc d
     jr .nextChar
 
+; ------------------------------------------------
+; DrawMessageToBuffer
+;
+; Builds the message in the linear off-screen frame buffer.
+; The traversal and clipping match DrawMessage; only the final
+; glyph destination differs.
+;
+; Destroys: AF, BC, DE, HL, IX
+; ------------------------------------------------
+
+DrawMessageToBuffer:
+    xor a
+    ld (messageIndex),a
+
+    ld hl,256
+    ld bc,(scrollPos)
+    or a
+    sbc hl,bc
+    ex de,hl             ; DE = signed 16-bit starting X
+
+    ld hl,message
+
+.nextChar:
+    ld a,(hl)
+    or a
+    ret z
+
+    bit 7,d
+    jr nz,.advance
+
+    ld a,d
+    or a
+    jr nz,.advance
+
+    ld a,e
+    cp 249
+    jr nc,.advance
+
+    push hl
+    push de
+
+    ld a,e
+    call GetSineY
+    ld b,a
+
+    pop de
+    push de
+    ld c,e
+
+    push bc
+    ld a,c
+    and 7
+    ld c,a
+    ld a,(messageIndex)
+    call GetShiftedCharacter
+    pop bc
+
+    call DrawShiftedChar8ToBuffer
+
+    pop de
+    pop hl
+
+.advance:
+    ld a,(messageIndex)
+    inc a
+    ld (messageIndex),a
+
+    inc hl
+
+    ld a,e
+    add a,8
+    ld e,a
+    jr nc,.nextChar
+
+    inc d
+    jr .nextChar
+
 
 ; ------------------------------------------------
 ; GetCharacterBitmap
@@ -420,6 +511,131 @@ EraseChar8:
     call NextPixelRow
 
     djnz .eraloop
+    ret
+
+; ------------------------------------------------
+; GetFrameBufferAddress
+;
+; Converts screen coordinates into the 32-byte-wide linear buffer.
+;
+; In:        B = screen pixel Y (64-103), C = pixel X
+; Out:       HL = buffer byte address
+; Clobbers:  AF, DE, HL
+; ------------------------------------------------
+
+GetFrameBufferAddress:
+    ld a,b
+    sub 64
+    ld l,a
+    ld h,0
+
+    ; Relative row * 32.
+    add hl,hl
+    add hl,hl
+    add hl,hl
+    add hl,hl
+    add hl,hl
+
+    ld a,c
+    srl a
+    srl a
+    srl a
+    ld e,a
+    ld d,0
+    add hl,de
+
+    ld de,FrameBuffer
+    add hl,de
+    ret
+
+    macro DRAW_BUFFER_SHIFTED_ROW rowOffset
+        ld a,(ix+rowOffset)
+        or (hl)
+        ld (hl),a
+        inc hl
+        ld a,(ix+rowOffset+1)
+        or (hl)
+        ld (hl),a
+        dec hl
+        add hl,de
+    endm
+
+    macro DRAW_BUFFER_ALIGNED_ROW rowOffset
+        ld a,(ix+rowOffset)
+        or (hl)
+        ld (hl),a
+        add hl,de
+    endm
+
+; ------------------------------------------------
+; DrawShiftedChar8ToBuffer
+;
+; In:        IX = prepared glyph, B = screen Y, C = screen X
+; Out:       none
+; Clobbers:  AF, DE, HL
+; ------------------------------------------------
+
+DrawShiftedChar8ToBuffer:
+    call GetFrameBufferAddress
+    ld de,32             ; Distance between linear buffer rows
+
+    ld a,c
+    and 7
+    jr z,.aligned
+
+    DRAW_BUFFER_SHIFTED_ROW 0
+    DRAW_BUFFER_SHIFTED_ROW 2
+    DRAW_BUFFER_SHIFTED_ROW 4
+    DRAW_BUFFER_SHIFTED_ROW 6
+    DRAW_BUFFER_SHIFTED_ROW 8
+    DRAW_BUFFER_SHIFTED_ROW 10
+    DRAW_BUFFER_SHIFTED_ROW 12
+    DRAW_BUFFER_SHIFTED_ROW 14
+    ret
+
+.aligned:
+    DRAW_BUFFER_ALIGNED_ROW 0
+    DRAW_BUFFER_ALIGNED_ROW 2
+    DRAW_BUFFER_ALIGNED_ROW 4
+    DRAW_BUFFER_ALIGNED_ROW 6
+    DRAW_BUFFER_ALIGNED_ROW 8
+    DRAW_BUFFER_ALIGNED_ROW 10
+    DRAW_BUFFER_ALIGNED_ROW 12
+    DRAW_BUFFER_ALIGNED_ROW 14
+    ret
+
+; Clears all 40 * 32 bytes of the off-screen frame buffer.
+ClearFrameBuffer:
+    ld hl,FrameBuffer
+    ld de,FrameBuffer+1
+    ld bc,FRAME_BUFFER_SIZE-1
+    xor a
+    ld (hl),a
+    ldir
+    ret
+
+; Copies the 40 linear buffer rows to pixel rows 64-103 in the
+; Spectrum's non-linear display file.
+CopyFrameBufferToScreen:
+    ld hl,FrameBuffer
+    ld de,$4800          ; Pixel row 64, byte column 0
+    ld a,40
+
+.nextRow:
+    push af
+    push de
+
+    ld bc,32
+    ldir
+
+    pop de              ; Restore the start of this screen row
+    ex de,hl             ; HL = screen row, DE = next buffer row
+    call NextPixelRow
+    ex de,hl             ; DE = next screen row, HL = buffer row
+
+    pop af
+    dec a
+    jr nz,.nextRow
     ret
 
 ; ------------------------------------------------
@@ -850,3 +1066,10 @@ SHIFTED_GLYPH_SIZE equ 128
 ; Eight shifts * 16 bytes for each character occurrence in the message.
 ShiftedMessageFont:
     defs MESSAGE_LENGTH * SHIFTED_GLYPH_SIZE,0
+
+FRAME_BUFFER_HEIGHT equ 40
+FRAME_BUFFER_SIZE   equ 32 * FRAME_BUFFER_HEIGHT
+
+; Linear rows corresponding to visible pixel rows 64-103.
+FrameBuffer:
+    defs FRAME_BUFFER_SIZE,0
