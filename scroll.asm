@@ -1,6 +1,12 @@
     org $8000
     jp start
 
+; Set to 1 to show frame-time phases in the border:
+;   yellow = erasing characters at their old positions
+;   red    = drawing the message
+;   black  = remaining frame time
+PROFILE_BORDER equ 1
+
 charX:
     db 240
 
@@ -56,15 +62,32 @@ start:
 mainLoop:
     halt
 
-    call ClearScrollBand
-    call DrawMessage
+    if PROFILE_BORDER
+        ld a,6             ; Yellow: erase phase begins
+        out ($fe),a
+    endif
 
-    ; Advance scroll position
+    call EraseMessage
+
+    ; Advance the message before drawing its new position.
     ld hl,(scrollPos)
     inc hl
     ld (scrollPos),hl
 
-    ; Restart after message has passed
+    if PROFILE_BORDER
+        ld a,2             ; Red: draw phase begins
+        out ($fe),a
+    endif
+
+    call DrawMessage
+
+    if PROFILE_BORDER
+        xor a              ; Black: rendering is complete
+        out ($fe),a
+    endif
+
+    ; Restart after the message has passed completely off the left edge.
+    ld hl,(scrollPos)
     ld de,256+MESSAGE_WIDTH
     or a
     sbc hl,de
@@ -76,6 +99,76 @@ mainLoop:
     ld (scrollPos),hl
 
     jr mainLoop
+
+
+; ------------------------------------------------
+; EraseMessage
+;
+; Erases all visible characters at the current
+; scroll position. This replaces clearing the whole
+; 40-pixel-high scroll band every frame.
+;
+; Uses:
+;   scrollPos
+;   message
+;
+; Destroys: AF, BC, DE, HL
+; ------------------------------------------------
+
+EraseMessage:
+    ; Starting X = 256 - scrollPos
+    ld hl,256
+    ld bc,(scrollPos)
+    or a
+    sbc hl,bc
+    ex de,hl             ; DE = signed 16-bit starting X
+
+    ld hl,message
+
+.nextChar:
+    ld a,(hl)
+    or a
+    ret z
+
+    ; Skip characters left of the screen.
+    bit 7,d
+    jr nz,.advance
+
+    ; Skip characters at or beyond X = 256.
+    ld a,d
+    or a
+    jr nz,.advance
+
+    ; A complete 8-pixel glyph must begin at X <= 248.
+    ld a,e
+    cp 249
+    jr nc,.advance
+
+    push hl
+    push de
+
+    ld a,e
+    call GetSineY
+    ld b,a
+
+    pop de
+    push de
+    ld c,e
+    call EraseChar8
+
+    pop de
+    pop hl
+
+.advance:
+    inc hl
+
+    ld a,e
+    add a,8
+    ld e,a
+    jr nc,.nextChar
+
+    inc d
+    jr .nextChar
 
 
 ;    xor a
@@ -294,14 +387,26 @@ CopyAndThickenFont:
 EraseChar8:
     call GetScreenAddress
 
+    ld a,c
+    and 7
+    ld c,a              ; C = horizontal shift
+
     ld b,8
 
 .eraloop:
     xor a
     ld (hl),a
+
+    ld a,c
+    or a
+    jr z,.skipRight
+
+    xor a
     inc hl
     ld (hl),a
     dec hl
+
+.skipRight:
 
     call NextPixelRow
 
