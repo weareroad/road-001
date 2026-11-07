@@ -12,6 +12,20 @@ FONT_FIRST_CHAR  equ 32
 FONT_LAST_CHAR   equ 93
 FONT_GLYPH_COUNT equ FONT_LAST_CHAR-FONT_FIRST_CHAR+1
 
+SCROLLER_CENTRE_Y  equ 152
+SCROLLER_AMPLITUDE equ 8
+SCROLLER_GLYPH_H   equ 8
+SCROLLER_TOP_Y     equ SCROLLER_CENTRE_Y-SCROLLER_AMPLITUDE
+SCROLLER_HEIGHT    equ SCROLLER_AMPLITUDE*2+SCROLLER_GLYPH_H
+
+; Screen address of pixel row 144, byte column 0. This is deliberately
+; fixed because the production scroller now lives wholly in the lower third.
+SCROLLER_SCREEN_ADDRESS equ $5040
+
+    assert SCROLLER_TOP_Y == 144
+    assert SCROLLER_TOP_Y >= 128
+    assert SCROLLER_TOP_Y+SCROLLER_HEIGHT <= 192
+
 charX:
     db 240
 
@@ -754,7 +768,7 @@ ClearFrameBuffer:
     ei
     ret
 
-; Copies the 24 linear buffer rows to pixel rows 72-95 in the
+; Copies the 24 linear buffer rows to pixel rows 144-167 in the
 ; Spectrum's non-linear display file.
     macro COPY_EIGHT_BYTES
         ldi
@@ -769,7 +783,7 @@ ClearFrameBuffer:
 
 CopyFrameBufferToScreen:
     ld hl,FrameBuffer
-    ld de,$4820          ; Pixel row 72, byte column 0
+    ld de,SCROLLER_SCREEN_ADDRESS
     ld a,FRAME_BUFFER_HEIGHT
 
 .nextRow:
@@ -786,12 +800,39 @@ CopyFrameBufferToScreen:
 
     pop de              ; Restore the start of this screen row
     ex de,hl             ; HL = screen row, DE = next buffer row
-    call NextPixelRow
+    call NextLowerThirdPixelRow
     ex de,hl             ; DE = next screen row, HL = buffer row
 
     pop af
     dec a
     jr nz,.nextRow
+    ret
+
+; ------------------------------------------------
+; NextLowerThirdPixelRow
+;
+; Specialized row advance for the production band at Y=144-167.
+; Unlike the general NextPixelRow routine, this path cannot cross a
+; 64-pixel screen third and its low address byte cannot overflow.
+;
+; In:        HL = current lower-third screen row address
+; Out:       HL = same byte column on the next pixel row
+; Clobbers:  AF, HL
+; ------------------------------------------------
+
+NextLowerThirdPixelRow:
+    inc h
+    ld a,h
+    and 7
+    ret nz
+
+    ld a,l
+    add a,32
+    ld l,a
+
+    ld a,h
+    sub 8
+    ld h,a
     ret
 
 ; ------------------------------------------------
@@ -990,7 +1031,7 @@ BuildSineRowOffsetTable:
     push bc
 
     ld a,(hl)
-    add a,8              ; Buffer row = (80 + sine) - top row 72
+    add a,SCROLLER_AMPLITUDE
 
     push hl
     ld l,a
@@ -1206,7 +1247,7 @@ GetSineY:
     add hl,de
 
     ld a,(hl)
-    add a,80
+    add a,SCROLLER_CENTRE_Y
 
     ret
 
@@ -1269,13 +1310,13 @@ ShiftedFont:
 ShiftedMessageFont:
     defs FONT_GLYPH_COUNT * SHIFTED_GLYPH_SIZE,0
 
-FRAME_BUFFER_HEIGHT equ 24
+FRAME_BUFFER_HEIGHT equ SCROLLER_HEIGHT
 FRAME_BUFFER_SIZE   equ 32 * FRAME_BUFFER_HEIGHT
 
 ; 64 little-endian offsets generated from sineTable at startup.
 SineRowOffsetTable:
     defs 64 * 2,0
 
-; Linear rows corresponding to visible pixel rows 72-95.
+; Linear rows corresponding to visible pixel rows 144-167.
 FrameBuffer:
     defs FRAME_BUFFER_SIZE,0
