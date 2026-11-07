@@ -10,7 +10,7 @@ PROFILE_BORDER equ 1
 
 ; Temporary milestone: alternate visibly between bank 5 and bank 7.
 ; Set to 0 after paging has been verified in the emulator.
-PAGING_TEST equ 1
+PAGING_TEST equ 0
 
 PAGING_PORT          equ $7ffd
 PAGING_BANK_7        equ %00000111
@@ -66,6 +66,9 @@ pagingState:
 flipDelay:
     db 50
 
+hiddenScreenBaseHigh:
+    db $c0
+
 message:
     ; Eight source lines of 32 characters form one continuous message.
     db "WELCOME TO THE ZX SPECTRUM DEMO."
@@ -113,14 +116,15 @@ start:
     ld (hl),%00000111
     ldir
 
+    call InitialiseShadowScreen
+
     if PAGING_TEST
-        call InitialiseShadowTestScreen
         jp PagingTestLoop
     endif
 
     call CopyAndThickenFont
     call BuildShiftedFont
-    call BuildSineRowOffsetTable
+    call BuildSineScreenOffsetTable
 
  ; Initialise scroll position
     ld hl,0
@@ -130,12 +134,14 @@ start:
     ei
 
 mainLoop:
+    call SelectHiddenScreen
+
     if PROFILE_BORDER
-        ld a,6             ; Yellow: clear the next frame
+        ld a,6             ; Yellow: clear the hidden screen band
         out ($fe),a
     endif
 
-    call ClearFrameBuffer
+    call ClearHiddenScrollBand
 
     ; Advance and construct the next complete frame off screen.
     ld hl,(scrollPos)
@@ -143,26 +149,30 @@ mainLoop:
     ld (scrollPos),hl
 
     if PROFILE_BORDER
-        ld a,2             ; Red: off-screen rendering begins
+        ld a,2             ; Red: hidden-screen rendering begins
         out ($fe),a
     endif
 
-    call DrawMessageToBuffer
+    call DrawMessageToHiddenScreen
 
     if PROFILE_BORDER
         xor a              ; Black: frame construction is complete
         out ($fe),a
     endif
 
-    ; Keep the old complete frame visible until the next interrupt.
+    ; Keep the old complete screen visible until the next interrupt.
     halt
 
     if PROFILE_BORDER
-        ld a,5             ; Cyan: publish the completed frame
+        ld a,5             ; Cyan: flip the completed hardware screen
         out ($fe),a
     endif
 
-    call CopyFrameBufferToScreen
+    ld a,(pagingState)
+    xor PAGING_SHADOW_SCREEN
+    di
+    call WritePagingState
+    ei
 
     if PROFILE_BORDER
         xor a
@@ -213,23 +223,23 @@ WritePagingState:
     ret
 
 ; ------------------------------------------------
-; InitialiseShadowTestScreen
+; InitialiseShadowScreen
 ;
-; Bank 7 is mapped at $C000 by Initialise128Paging. Fill its bitmap with
-; a visible stripe pattern and use cyan ink on black paper.
+; Bank 7 is mapped at $C000 by Initialise128Paging. Initialize it to the
+; same black bitmap and white-on-black attributes as the normal screen.
 ; ------------------------------------------------
 
-InitialiseShadowTestScreen:
+InitialiseShadowScreen:
     ld hl,$c000
     ld de,$c001
     ld bc,6143
-    ld (hl),%10101010
+    ld (hl),0
     ldir
 
     ld hl,$d800
     ld de,$d801
     ld bc,767
-    ld (hl),%00000101
+    ld (hl),%00000111
     ldir
     ret
 
@@ -477,16 +487,14 @@ DrawMessage:
     jr .nextChar
 
 ; ------------------------------------------------
-; DrawMessageToBuffer
+; DrawMessageToHiddenScreen
 ;
-; Builds the message in the linear off-screen frame buffer.
-; The traversal and clipping match DrawMessage; only the final
-; glyph destination differs.
+; Draws the message directly into whichever 128K hardware screen is hidden.
 ;
 ; Destroys: AF, BC, DE, HL, IX
 ; ------------------------------------------------
 
-DrawMessageToBuffer:
+DrawMessageToHiddenScreen:
     ; Work out whether the message has reached the left edge yet.
     ld hl,(scrollPos)
     ld de,256
@@ -592,7 +600,7 @@ DrawMessageToBuffer:
     push de
     ld c,e
 
-    call DrawShiftedChar8ToBuffer
+    call DrawShiftedChar8ToHiddenScreen
 
     pop de
     pop hl
@@ -759,17 +767,99 @@ EraseChar8:
     ret
 
 ; ------------------------------------------------
-; GetFrameBufferAddressForX
+; SelectHiddenScreen
 ;
-; Converts an X coordinate directly to its sine-wave row in the
-; 32-byte-wide linear buffer.
+; Chooses the CPU address base of the screen that the ULA is not currently
+; displaying. Bank 7 remains mapped at $C000 throughout the demo.
+; ------------------------------------------------
+
+SelectHiddenScreen:
+    ld a,(pagingState)
+    and PAGING_SHADOW_SCREEN
+    jr z,.shadowIsHidden
+
+    ld a,$40             ; Bank 7 visible: bank 5 at $4000 is hidden
+    ld (hiddenScreenBaseHigh),a
+    ret
+
+.shadowIsHidden:
+    ld a,$c0             ; Bank 5 visible: bank 7 at $C000 is hidden
+    ld (hiddenScreenBaseHigh),a
+    ret
+
+; ------------------------------------------------
+; ClearHiddenScrollBand
+;
+; Clears 24 non-linear screen rows with sixteen zero-word pushes per row.
+; SP is restored before any call and before returning. Interrupts remain
+; disabled whenever SP points into screen memory.
+; ------------------------------------------------
+
+ClearHiddenScrollBand:
+    di
+    ld (savedStackPointer),sp
+
+    ; SCROLLER_TOP_Y=144 has offset $1040 within either screen bank.
+    ld a,(hiddenScreenBaseHigh)
+    add a,$10
+    ld h,a
+    ld l,$40
+    push hl
+    pop ix               ; IX = start of current hidden-screen row
+
+    ld b,SCROLLER_HEIGHT
+
+.nextRow:
+    ld sp,(savedStackPointer)
+    push ix
+    pop hl
+    ld de,32
+    add hl,de
+    ld sp,hl             ; Stack starts just after this 32-byte row
+
+    ld hl,0
+    push hl
+    push hl
+    push hl
+    push hl
+    push hl
+    push hl
+    push hl
+    push hl
+    push hl
+    push hl
+    push hl
+    push hl
+    push hl
+    push hl
+    push hl
+    push hl
+
+    ld sp,(savedStackPointer)
+    push ix
+    pop hl
+    call NextLowerThirdPixelRow
+    push hl
+    pop ix
+
+    djnz .nextRow
+
+    ld sp,(savedStackPointer)
+    ei
+    ret
+
+; ------------------------------------------------
+; GetHiddenScreenAddressForX
+;
+; Converts an X coordinate directly to its sine-wave address in whichever
+; hardware screen is currently hidden.
 ;
 ; In:        C = pixel X
-; Out:       HL = buffer byte address
+; Out:       HL = hidden-screen byte address
 ; Clobbers:  AF, DE, HL
 ; ------------------------------------------------
 
-GetFrameBufferAddressForX:
+GetHiddenScreenAddressForX:
     ; The sine phase is (X / 2) MOD 64. Each table entry is a 16-bit
     ; precomputed row offset, so double the phase for the lookup.
     ld a,c
@@ -778,80 +868,78 @@ GetFrameBufferAddressForX:
     add a,a
     ld l,a
     ld h,0
-    ld de,SineRowOffsetTable
+    ld de,SineScreenOffsetTable
     add hl,de
 
     ld e,(hl)
     inc hl
     ld d,(hl)
-    ex de,hl             ; HL = precomputed row * 32
+    ex de,hl             ; HL = screen offset relative to bank base
 
     ld a,c
     srl a
     srl a
     srl a
-    ld e,a
-    ld d,0
-    add hl,de
+    or l                 ; Row addresses are byte-column aligned
+    ld l,a
 
-    ld de,FrameBuffer
-    add hl,de
+    ld a,(hiddenScreenBaseHigh)
+    add a,h
+    ld h,a
     ret
 
-    macro DRAW_BUFFER_SHIFTED_ROW rowOffset
+    macro DRAW_HIDDEN_SHIFTED_ROW rowOffset
         ld a,(ix+rowOffset)
         or (hl)
         ld (hl),a
         inc hl
         ld a,(ix+rowOffset+1)
-        ; The right byte is untouched in a cleared, left-to-right render.
         ld (hl),a
         dec hl
-        add hl,de
+        call NextLowerThirdPixelRow
     endm
 
-    macro DRAW_BUFFER_ALIGNED_ROW rowOffset
+    macro DRAW_HIDDEN_ALIGNED_ROW rowOffset
         ld a,(ix+rowOffset)
         or (hl)
         ld (hl),a
-        add hl,de
+        call NextLowerThirdPixelRow
     endm
 
 ; ------------------------------------------------
-; DrawShiftedChar8ToBuffer
+; DrawShiftedChar8ToHiddenScreen
 ;
 ; In:        IX = prepared glyph, C = screen X
 ; Out:       none
 ; Clobbers:  AF, DE, HL
 ; ------------------------------------------------
 
-DrawShiftedChar8ToBuffer:
-    call GetFrameBufferAddressForX
-    ld de,32             ; Distance between linear buffer rows
+DrawShiftedChar8ToHiddenScreen:
+    call GetHiddenScreenAddressForX
 
     ld a,c
     and 7
     jr z,.aligned
 
-    DRAW_BUFFER_SHIFTED_ROW 0
-    DRAW_BUFFER_SHIFTED_ROW 2
-    DRAW_BUFFER_SHIFTED_ROW 4
-    DRAW_BUFFER_SHIFTED_ROW 6
-    DRAW_BUFFER_SHIFTED_ROW 8
-    DRAW_BUFFER_SHIFTED_ROW 10
-    DRAW_BUFFER_SHIFTED_ROW 12
-    DRAW_BUFFER_SHIFTED_ROW 14
+    DRAW_HIDDEN_SHIFTED_ROW 0
+    DRAW_HIDDEN_SHIFTED_ROW 2
+    DRAW_HIDDEN_SHIFTED_ROW 4
+    DRAW_HIDDEN_SHIFTED_ROW 6
+    DRAW_HIDDEN_SHIFTED_ROW 8
+    DRAW_HIDDEN_SHIFTED_ROW 10
+    DRAW_HIDDEN_SHIFTED_ROW 12
+    DRAW_HIDDEN_SHIFTED_ROW 14
     ret
 
 .aligned:
-    DRAW_BUFFER_ALIGNED_ROW 0
-    DRAW_BUFFER_ALIGNED_ROW 2
-    DRAW_BUFFER_ALIGNED_ROW 4
-    DRAW_BUFFER_ALIGNED_ROW 6
-    DRAW_BUFFER_ALIGNED_ROW 8
-    DRAW_BUFFER_ALIGNED_ROW 10
-    DRAW_BUFFER_ALIGNED_ROW 12
-    DRAW_BUFFER_ALIGNED_ROW 14
+    DRAW_HIDDEN_ALIGNED_ROW 0
+    DRAW_HIDDEN_ALIGNED_ROW 2
+    DRAW_HIDDEN_ALIGNED_ROW 4
+    DRAW_HIDDEN_ALIGNED_ROW 6
+    DRAW_HIDDEN_ALIGNED_ROW 8
+    DRAW_HIDDEN_ALIGNED_ROW 10
+    DRAW_HIDDEN_ALIGNED_ROW 12
+    DRAW_HIDDEN_ALIGNED_ROW 14
     ret
 
 ; Clears all 40 * 32 bytes of the off-screen frame buffer.
@@ -1122,33 +1210,31 @@ BuildShiftedFont:
     ret
 
 ; ------------------------------------------------
-; BuildSineRowOffsetTable
+; BuildSineScreenOffsetTable
 ;
-; Converts each signed sine value into a 16-bit offset for the linear
-; frame buffer: (8 + sine value) * 32. Called once at startup.
+; Converts each signed sine value into a Spectrum bitmap address offset
+; relative to the start of either hardware screen. Called once at startup.
 ;
 ; Clobbers: AF, BC, DE, HL
 ; ------------------------------------------------
 
-BuildSineRowOffsetTable:
-    ld hl,sineTable
-    ld de,SineRowOffsetTable
+BuildSineScreenOffsetTable:
+    ld ix,sineTable
+    ld de,SineScreenOffsetTable
     ld b,64
 
 .nextValue:
     push bc
 
-    ld a,(hl)
-    add a,SCROLLER_AMPLITUDE
+    ld a,(ix+0)
+    add a,SCROLLER_CENTRE_Y
+    ld b,a
+    ld c,0
+    call GetScreenAddress
 
-    push hl
-    ld l,a
-    ld h,0
-    add hl,hl
-    add hl,hl
-    add hl,hl
-    add hl,hl
-    add hl,hl
+    ; GetScreenAddress returns a normal-screen address in $4000-$57FF.
+    ; Removing bit 6 turns it into an offset suitable for either screen base.
+    res 6,h
 
     ld a,l
     ld (de),a
@@ -1157,8 +1243,7 @@ BuildSineRowOffsetTable:
     ld (de),a
     inc de
 
-    pop hl
-    inc hl
+    inc ix
 
     pop bc
     djnz .nextValue
@@ -1421,8 +1506,8 @@ ShiftedMessageFont:
 FRAME_BUFFER_HEIGHT equ SCROLLER_HEIGHT
 FRAME_BUFFER_SIZE   equ 32 * FRAME_BUFFER_HEIGHT
 
-; 64 little-endian offsets generated from sineTable at startup.
-SineRowOffsetTable:
+; 64 little-endian screen offsets generated from sineTable at startup.
+SineScreenOffsetTable:
     defs 64 * 2,0
 
 ; Linear rows corresponding to visible pixel rows 144-167.
