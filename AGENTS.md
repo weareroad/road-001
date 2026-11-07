@@ -42,14 +42,14 @@ The reproducible active build is:
 build.bat
 ```
 
-It assembles `main.asm` and produces `demo-128.sna`. Do not treat generated
+It assembles `main.asm` and produces `road-001.sna`. Do not treat generated
 snapshots, symbols, listings or maps as source files.
 
 ## Active source and assets
 
 - `main.asm`: 128K device definition, component inclusion, screen asset in RAM
   bank 0, memory assertions and snapshot output
-- `scroller-128.asm`: startup orchestration, paging, renderer, generated font
+- `road-001.asm`: startup orchestration, paging, renderer, generated font
   data, sine addressing, PT3 integration and frame loop
 - `loader.asm`: reusable fake cassette-loader component
 - `demo.scr`: replaceable 6,912-byte screen image

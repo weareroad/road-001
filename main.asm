@@ -8,7 +8,7 @@
 ; Set to 1 after placing a 6912-byte Spectrum .scr file at demo.scr.
 USE_SCREEN_ASSET equ 1
 
-    INCLUDE "scroller-128.asm"
+    INCLUDE "road-001.asm"
     INCLUDE "loader.asm"
 
 ; The fake loader is also resident in fixed bank 2. Keep the same minimum
@@ -30,4 +30,4 @@ ScreenAssetEnd:
 
     assert ScreenAssetEnd-ScreenAsset == 6912
 
-    SAVESNA "demo-128.sna", start
+    SAVESNA "road-001.sna", start

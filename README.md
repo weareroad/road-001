@@ -47,7 +47,7 @@ Run:
 build.bat
 ```
 
-This assembles `main.asm` and creates `demo-128.sna`. Open that snapshot in
+This assembles `main.asm` and creates `road-001.sna`. Open that snapshot in
 ZXSpin configured as a ZX Spectrum 128K; it starts the demo automatically.
 
 The former 48K build and standalone experiments are retained in
@@ -57,7 +57,7 @@ The former 48K build and standalone experiments are retained in
 
 ### Message
 
-Edit `message` near the beginning of `scroller-128.asm`.
+Edit `message` near the beginning of `road-001.asm`.
 
 The adjacent `db` strings are assembled as one continuous message, not
 displayed as separate lines. Using 32-character source lines is convenient but
@@ -122,7 +122,7 @@ instead of including `demo.scr`.
 
 The current module is `just_say_no.pt3`. To use another PT3 module, replace
 that file or change the `incbin` filename at `AudioModule` near the end of
-`scroller-128.asm`.
+`road-001.asm`.
 
 The bundled replay routine is Vortex Tracker's PT3 player from
 `third_party/vt_sound/PT3PROM-sjasmplus.asm`. Its licence is retained in
@@ -130,7 +130,7 @@ The bundled replay routine is Vortex Tracker's PT3 player from
 
 ### Scroller colours
 
-The three fixed ink colours are defined near the top of `scroller-128.asm` as
+The three fixed ink colours are defined near the top of `road-001.asm` as
 `ATTR_BRIGHT_RED`, `ATTR_BRIGHT_YELLOW` and `ATTR_BRIGHT_BLUE`.
 
 The attributes remain stationary; the moving bitmap takes on each colour as it
@@ -138,7 +138,7 @@ passes through the corresponding row.
 
 ### Border profiling
 
-Set `PROFILE_BORDER equ 1` near the top of `scroller-128.asm` to display the
+Set `PROFILE_BORDER equ 1` near the top of `road-001.asm` to display the
 frame phases in the border:
 
 - yellow: clear the hidden scroller band;
@@ -181,7 +181,7 @@ then left mapped for the double-buffered renderer.
 
 - `main.asm` - active 128K entry point, components, screen asset and snapshot
   packaging
-- `scroller-128.asm` - active demo, renderer, initialization and music
+- `road-001.asm` - active demo, renderer, initialization and music
 - `loader.asm` - reusable fake cassette-loader component
 - `demo.scr` - replaceable static Spectrum screen image
 - `just_say_no.pt3` - current replaceable music module
