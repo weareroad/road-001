@@ -19,19 +19,21 @@ The source assembles successfully and has been visually confirmed in Fuse and ZX
 
 ## Build
 
-With SjASMPlus on `PATH`:
+The active Spectrum 128K build is:
 
 ```text
 build.bat
 ```
 
-or directly:
+This creates `demo-128.sna` from `scroller-128.asm`.
+
+The frozen Spectrum 48K teaser build remains available through:
 
 ```text
-sjasmplus main.asm
+build-48.bat
 ```
 
-This creates `demo.sna`, a 48K snapshot with execution beginning at `start` (`$8000` via the entry jump).
+This creates `demo-48.sna` from `scroller-stage2.asm`.
 
 ## Run
 
@@ -39,8 +41,11 @@ Open `demo.sna` in Fuse or ZXSpin. CSpect is primarily reserved for the later Sp
 
 ## Source guide
 
-- `main.asm` — SjASMPlus 48K entry and snapshot packaging.
-- `scroll.asm` — current baseline candidate and original renderer.
+- `main.asm` — active SjASMPlus 128K entry and snapshot packaging.
+- `main-48.asm` — frozen 48K teaser entry and snapshot packaging.
+- `scroller-128.asm` — active 128K development source.
+- `scroller-stage2.asm` — frozen, scalable 48K teaser source.
+- `scroll.asm` — earlier 48K reference implementation.
 - `later-scroll.asm` — broken/unfinished optimization experiment; reference only.
 - `scroller-handover.md` — detailed history, known issues, and recovery plan.
 - `AGENTS.md` — project conventions and verification requirements.

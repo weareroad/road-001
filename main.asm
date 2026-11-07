@@ -1,10 +1,10 @@
-; ZX Spectrum 48K sine-scroller baseline
+; Active ZX Spectrum 128K demo build
 ;
 ; Assemble with:
 ;   sjasmplus main.asm
 
-    DEVICE ZXSPECTRUM48
+    DEVICE ZXSPECTRUM128
 
-    INCLUDE "scroller-stage2.asm"
+    INCLUDE "scroller-128.asm"
 
-    SAVESNA "demo.sna", start
+    SAVESNA "demo-128.sna", start
