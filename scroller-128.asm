@@ -8,10 +8,6 @@
 ;   black  = waiting/remaining frame time
 PROFILE_BORDER equ 1
 
-; Temporary milestone: alternate visibly between bank 5 and bank 7.
-; Set to 0 after paging has been verified in the emulator.
-PAGING_TEST equ 0
-
 PAGING_PORT          equ $7ffd
 PAGING_BANK_7        equ %00000111
 PAGING_SHADOW_SCREEN equ %00001000
@@ -34,37 +30,18 @@ SCROLLER_GLYPH_H   equ 8
 SCROLLER_TOP_Y     equ SCROLLER_CENTRE_Y-SCROLLER_AMPLITUDE
 SCROLLER_HEIGHT    equ SCROLLER_AMPLITUDE*2+SCROLLER_GLYPH_H
 
-; Screen address of pixel row 144, byte column 0. This is deliberately
-; fixed because the production scroller now lives wholly in the lower third.
-SCROLLER_SCREEN_ADDRESS equ $5040
-
     assert SCROLLER_TOP_Y == 144
     assert SCROLLER_TOP_Y >= 128
     assert SCROLLER_TOP_Y+SCROLLER_HEIGHT <= 192
 
-charX:
-    db 240
-
-charY:
-    db 80
-
 scrollPos:
     dw 0
-
-messageIndex:
-    db 0
 
 savedStackPointer:
     dw 0
 
-currentShiftOffset:
-    db 0
-
 pagingState:
     db PAGING_INITIAL
-
-flipDelay:
-    db 50
 
 hiddenScreenBaseHigh:
     db $c0
@@ -117,10 +94,6 @@ start:
     ldir
 
     call InitialiseShadowScreen
-
-    if PAGING_TEST
-        jp PagingTestLoop
-    endif
 
     call CopyAndThickenFont
     call BuildShiftedFont
@@ -243,250 +216,6 @@ InitialiseShadowScreen:
     ldir
     ret
 
-; ------------------------------------------------
-; PagingTestLoop
-;
-; Alternates bank 5 and bank 7 once per second. The normal screen is blank;
-; the shadow screen contains cyan stripes. This loop is compiled only while
-; PAGING_TEST is non-zero.
-; ------------------------------------------------
-
-PagingTestLoop:
-    im 1
-    ei
-
-.waitFrame:
-    halt
-    ld a,(flipDelay)
-    dec a
-    ld (flipDelay),a
-    jr nz,.waitFrame
-
-    ld a,50
-    ld (flipDelay),a
-
-    ld a,(pagingState)
-    xor PAGING_SHADOW_SCREEN
-    di
-    call WritePagingState
-    ei
-    jr .waitFrame
-
-
-; ------------------------------------------------
-; EraseMessage
-;
-; Erases all visible characters at the current
-; scroll position. This replaces clearing the whole
-; 40-pixel-high scroll band every frame.
-;
-; Uses:
-;   scrollPos
-;   message
-;
-; Destroys: AF, BC, DE, HL
-; ------------------------------------------------
-
-EraseMessage:
-    ; Starting X = 256 - scrollPos
-    ld hl,256
-    ld bc,(scrollPos)
-    or a
-    sbc hl,bc
-    ex de,hl             ; DE = signed 16-bit starting X
-
-    ld hl,message
-
-.nextChar:
-    ld a,(hl)
-    or a
-    ret z
-
-    ; Skip characters left of the screen.
-    bit 7,d
-    jr nz,.advance
-
-    ; Skip characters at or beyond X = 256.
-    ld a,d
-    or a
-    jr nz,.advance
-
-    ; A complete 8-pixel glyph must begin at X <= 248.
-    ld a,e
-    cp 249
-    jr nc,.advance
-
-    push hl
-    push de
-
-    ld a,e
-    call GetSineY
-    ld b,a
-
-    pop de
-    push de
-    ld c,e
-    call EraseChar8
-
-    pop de
-    pop hl
-
-.advance:
-    inc hl
-
-    ld a,e
-    add a,8
-    ld e,a
-    jr nc,.nextChar
-
-    inc d
-    jr .nextChar
-
-
-;    xor a
-;    ld (scrollPos),a
-;    ld (scrollPos+1),a
-
-;    jr mainLoop
-
-;    ld a,240
-;    ld (charX),a
-
-;mainLoop:
-;    halt
-
-    ; Erase old character
-;    ld a,(charX)
-;    ld c,a
-;    ld a,(charY)
-;    ld b,a
-;    call EraseChar8
-
-    ; Move left
-;    ld a,(charX)
-;    dec a
-;    cp 8
-;    jr nc,.storeX
-;    ld a,240
-
-;.storeX:
-;    ld (charX),a
-
-    ; Calculate new Y
-;    call GetSineY
-;    ld (charY),a
-
-    ; Draw character at new position
-;    ld b,a
-;    ld a,(charX)
-;    ld c,a
-;    ld a, "D"
-;    call GetCharacterBitmap
-;    ld ix,FontBuffer + $108
-;    ld b,80
-;    ld c,101
-
-;    call DrawChar8
-
-;    jr mainLoop
-
-; ------------------------------------------------
-; DrawMessage
-;
-; Draws all visible characters of message
-; along the sine wave.
-;
-; Uses:
-;   scrollPos
-;   message
-;
-; Destroys: AF, BC, DE, HL, IX
-; ------------------------------------------------
-
-DrawMessage:
-    xor a
-    ld (messageIndex),a
-
-    ld hl,message
-
-    ; Initial X = 256 - scrollPos
-    ld de,256
-    ld bc,(scrollPos)
-
-    ex de,hl
-    or a
-    sbc hl,bc
-    ex de,hl
-
-    ld hl,message
-
-.nextChar:
-    ld a,(hl)
-    or a
-    ret z
-
-    ; DE = signed 16-bit X coordinate
-    ; Skip characters to the left of screen
-
-    bit 7,d
-    jr nz,.advance
-
-    ; Skip characters beyond right edge
-    ld a,d
-    or a
-    jr nz,.advance
-
-    ; E = low byte of X
-    ; Only draw if X <= 248
-    ld a,e
-    cp 249
-    jr nc,.advance
-
-    ; Save message pointer and X position
-    push hl
-    push de
-
-    ; Calculate Y from X
-    ld a,e
-    call GetSineY
-    ld b,a
-
-    ; Restore X for drawing
-    pop de
-    push de
-    ld c,e
-
-    ; Preserve the screen coordinates while looking up the prepared glyph.
-    push bc
-    ld a,c
-    and 7
-    ld c,a
-    ld a,(messageIndex)
-    call GetShiftedCharacter
-    pop bc
-
-    call DrawShiftedChar8
-
-    ; Restore state
-    pop de
-    pop hl
-
-.advance:
-    ; Next character, 8 pixels to the right
-    ld a,(messageIndex)
-    inc a
-    ld (messageIndex),a
-
-    inc hl
-
-    ld a,e
-    add a,8
-    ld e,a
-    jr nc,.nextChar
-    inc d
-    jr .nextChar
-
-; ------------------------------------------------
 ; DrawMessageToHiddenScreen
 ;
 ; Draws the message directly into whichever 128K hardware screen is hidden.
@@ -617,53 +346,6 @@ DrawMessageToHiddenScreen:
     jr .nextChar
 
 ; ------------------------------------------------
-; GetSharedShiftedGlyph
-;
-; Finds a prepared glyph in the 256-byte-aligned, glyph-major shared font.
-; Each glyph occupies 128 bytes; parity selects the low-byte half while
-; characterIndex / 2 selects the high byte. The frame's shared shift is a
-; 0-112 byte offset that never carries into the next page.
-;
-; In:        A = supported ASCII character
-; Out:       IX = address of its prepared 16-byte shifted glyph
-; Preserves: BC
-; Clobbers:  AF, DE, IX
-; ------------------------------------------------
-
-GetSharedShiftedGlyph:
-    ; Unsupported values display as spaces rather than indexing outside
-    ; the prepared font table.
-    cp FONT_FIRST_CHAR
-    jr c,.useSpace
-    cp FONT_LAST_CHAR+1
-    jr c,.supported
-
-.useSpace:
-    ld a,' '
-
-.supported:
-    sub FONT_FIRST_CHAR
-    srl a                 ; Carry = odd glyph index; A = index / 2
-    ld d,a
-
-    ld a,0                ; Convert carry into either $00 or $80
-    rra
-    ld e,a
-
-    ld a,d
-    add a,ShiftedFont >> 8
-    ld d,a
-
-    ld a,(currentShiftOffset)
-    add a,e
-    ld e,a
-
-    push de
-    pop ix
-    ret
-
-
-; ------------------------------------------------
 ; GetCharacterBitmap
 ;
 ; Input:
@@ -732,39 +414,6 @@ CopyAndThickenFont:
     ret
 
 
-
-; B = Y coordinate
-; C = X coordinate
-; Assumes X <= 248, Y <= 184
-
-EraseChar8:
-    call GetScreenAddress
-
-    ld a,c
-    and 7
-    ld c,a              ; C = horizontal shift
-
-    ld b,8
-
-.eraloop:
-    xor a
-    ld (hl),a
-
-    ld a,c
-    or a
-    jr z,.skipRight
-
-    xor a
-    inc hl
-    ld (hl),a
-    dec hl
-
-.skipRight:
-
-    call NextPixelRow
-
-    djnz .eraloop
-    ret
 
 ; ------------------------------------------------
 ; SelectHiddenScreen
@@ -942,74 +591,11 @@ DrawShiftedChar8ToHiddenScreen:
     DRAW_HIDDEN_ALIGNED_ROW 14
     ret
 
-; Clears all 40 * 32 bytes of the off-screen frame buffer.
-ClearFrameBuffer:
-    ; Use the stack as a fast 16-bit fill engine. Interrupts must remain
-    ; disabled while SP points into the buffer because an interrupt would
-    ; otherwise place its return address inside the image.
-    di
-    ld (savedStackPointer),sp
-    ld sp,FrameBuffer+FRAME_BUFFER_SIZE
-    ld hl,0
-
-    ; 128 iterations * 3 pushes * 2 bytes = 768 bytes.
-    ld b,FRAME_BUFFER_SIZE/6
-.clearLoop:
-    push hl
-    push hl
-    push hl
-    djnz .clearLoop
-
-    ld sp,(savedStackPointer)
-    ei
-    ret
-
-; Copies the 24 linear buffer rows to pixel rows 144-167 in the
-; Spectrum's non-linear display file.
-    macro COPY_EIGHT_BYTES
-        ldi
-        ldi
-        ldi
-        ldi
-        ldi
-        ldi
-        ldi
-        ldi
-    endm
-
-CopyFrameBufferToScreen:
-    ld hl,FrameBuffer
-    ld de,SCROLLER_SCREEN_ADDRESS
-    ld a,FRAME_BUFFER_HEIGHT
-
-.nextRow:
-    push af
-    push de
-
-    ; Unrolled LDI is 16 T-states per byte. LDIR would take 21 T-states
-    ; for every byte except the last one in each row.
-    ld bc,32
-    COPY_EIGHT_BYTES
-    COPY_EIGHT_BYTES
-    COPY_EIGHT_BYTES
-    COPY_EIGHT_BYTES
-
-    pop de              ; Restore the start of this screen row
-    ex de,hl             ; HL = screen row, DE = next buffer row
-    call NextLowerThirdPixelRow
-    ex de,hl             ; DE = next screen row, HL = buffer row
-
-    pop af
-    dec a
-    jr nz,.nextRow
-    ret
-
 ; ------------------------------------------------
 ; NextLowerThirdPixelRow
 ;
-; Specialized row advance for the production band at Y=144-167.
-; Unlike the general NextPixelRow routine, this path cannot cross a
-; 64-pixel screen third and its low address byte cannot overflow.
+; Specialized row advance for the production band at Y=144-167. This path
+; cannot cross a 64-pixel screen third and its low byte cannot overflow.
 ;
 ; In:        HL = current lower-third screen row address
 ; Out:       HL = same byte column on the next pixel row
@@ -1029,113 +615,6 @@ NextLowerThirdPixelRow:
     ld a,h
     sub 8
     ld h,a
-    ret
-
-; ------------------------------------------------
-; DrawShiftedChar8
-;
-; Draws one prepared 16-byte glyph. Each of its eight
-; rows contains a left byte followed by a right byte.
-;
-; In:        IX = prepared glyph, B = pixel Y, C = pixel X
-; Out:       none
-; Preserves: DE
-; Clobbers:  AF, BC, HL, IX
-; ------------------------------------------------
-
-    macro DRAW_PREPARED_SHIFTED_ROW rowOffset
-        ld a,(ix+rowOffset)
-        or (hl)
-        ld (hl),a
-        inc hl
-        ld a,(ix+rowOffset+1)
-        or (hl)
-        ld (hl),a
-        dec hl
-        call NextPixelRow
-    endm
-
-    macro DRAW_PREPARED_ALIGNED_ROW rowOffset
-        ld a,(ix+rowOffset)
-        or (hl)
-        ld (hl),a
-        call NextPixelRow
-    endm
-
-DrawShiftedChar8:
-    call GetScreenAddress
-
-    ; Select the one-byte or two-byte path once for the whole glyph.
-    ld a,c
-    and 7
-    jr z,.aligned
-
-    DRAW_PREPARED_SHIFTED_ROW 0
-    DRAW_PREPARED_SHIFTED_ROW 2
-    DRAW_PREPARED_SHIFTED_ROW 4
-    DRAW_PREPARED_SHIFTED_ROW 6
-    DRAW_PREPARED_SHIFTED_ROW 8
-    DRAW_PREPARED_SHIFTED_ROW 10
-    DRAW_PREPARED_SHIFTED_ROW 12
-    DRAW_PREPARED_SHIFTED_ROW 14
-    ret
-
-.aligned:
-    ; The aligned path also avoids writing beyond screen byte column 31.
-    DRAW_PREPARED_ALIGNED_ROW 0
-    DRAW_PREPARED_ALIGNED_ROW 2
-    DRAW_PREPARED_ALIGNED_ROW 4
-    DRAW_PREPARED_ALIGNED_ROW 6
-    DRAW_PREPARED_ALIGNED_ROW 8
-    DRAW_PREPARED_ALIGNED_ROW 10
-    DRAW_PREPARED_ALIGNED_ROW 12
-    DRAW_PREPARED_ALIGNED_ROW 14
-    ret
-
-; ------------------------------------------------
-; GetShiftedCharacter
-;
-; Locates one of eight prepared shifts for a message character.
-;
-; In:        A = message character index, C = shift (0-7)
-; Out:       IX = address of 16-byte prepared glyph
-; Preserves: DE
-; Clobbers:  AF, HL, IX
-; ------------------------------------------------
-
-GetShiftedCharacter:
-    push de
-
-    ld l,a
-    ld h,0
-
-    ; Each message character occupies 8 shifts * 16 bytes = 128 bytes.
-    add hl,hl
-    add hl,hl
-    add hl,hl
-    add hl,hl
-    add hl,hl
-    add hl,hl
-    add hl,hl
-
-    ld de,ShiftedMessageFont
-    add hl,de
-
-    ; Each horizontal shift occupies 16 bytes.
-    ld a,c
-    and 7
-    add a,a
-    add a,a
-    add a,a
-    add a,a
-    ld e,a
-    ld d,0
-    add hl,de
-
-    push hl
-    pop ix
-
-    pop de
     ret
 
 ; ------------------------------------------------
@@ -1250,137 +729,6 @@ BuildSineScreenOffsetTable:
     ret
 
 ; ------------------------------------------------
-; DrawChar8
-;
-; Input:
-;   IX = pointer to 8-byte bitmap
-;   B  = Y position
-;   C  = X position
-;
-; Assumptions:
-;   X <= 248
-;   Y <= 184
-;
-; Draws using OR (transparent background)
-; ------------------------------------------------
-
-DrawChar8:
-    call GetScreenAddress
-
-    ld a,c
-    and 7
-    ld c,a              ; C = shift count
-
-    ld b,8              ; Eight rows
-
-.drawRow:
-    push bc
-    push hl
-
-    ld a,(ix+0)
-    inc ix
-
-    ; D = left byte, E = right byte
-
-    ld d,a
-    ld e,0
-
-    ; Select an unrolled shift path. This avoids the loop-control cost of
-    ; shifting each row one bit at a time with DJNZ.
-    ld a,c
-    or a
-    jr z,.shiftDone
-
-    cp 4
-    jr c,.shift1to3
-
-    ; First four shifts for alignments 4-7.
-    srl d
-    rr e
-    srl d
-    rr e
-    srl d
-    rr e
-    srl d
-    rr e
-
-    sub 4
-    jr z,.shiftDone
-
-.shift1to3:
-    dec a
-    jr z,.shiftOne
-
-    dec a
-    jr z,.shiftTwo
-
-    ; Third remaining shift.
-    srl d
-    rr e
-
-.shiftTwo:
-    srl d
-    rr e
-
-.shiftOne:
-    srl d
-    rr e
-
-.shiftDone:
-    pop hl              ; Restore row start
-
-    ld a,d
-    or (hl)
-    ld (hl),a
-
-    ; Only write second byte if shifted
-
-    ld a,c
-    or a
-    jr z,.skipRight
-
-    inc hl
-    ld a,e
-    or (hl)
-    ld (hl),a
-    dec hl              ; Restore original X!
-
-.skipRight:
-    call NextPixelRow
-
-    pop bc
-    djnz .drawRow
-
-    ret
-
-; ------------------------------------------------
-; NextPixelRow
-;
-; Input:
-;   HL = current screen byte address
-;
-; Output:
-;   HL = address of same X, next pixel row
-;
-; ------------------------------------------------
-
-NextPixelRow:
-    inc h
-    ld a,h
-    and 7
-    ret nz
-
-    ld a,l
-    add a,32
-    ld l,a
-    ret c
-
-    ld a,h
-    sub 8
-    ld h,a
-    ret
-
-; ------------------------------------------------
 ; GetScreenAddress
 ;
 ; Input:
@@ -1423,61 +771,6 @@ GetScreenAddress:
     ret
 
 
-; Input:  A = X coordinate
-; Output: A = Y coordinate
-; Destroys: DE, HL
-
-GetSineY:
-    ; Divide X by 2 to stretch the wave
-    srl a
-
-    ; Wrap index to 0-63
-    and 63
-
-    ld e,a
-    ld d,0
-    ld hl,sineTable
-    add hl,de
-
-    ld a,(hl)
-    add a,SCROLLER_CENTRE_Y
-
-    ret
-
-; ------------------------------------------------
-; ClearScrollBand
-;
-; Clears screen pixel rows 64-103 inclusive.
-; Does not modify colour attributes.
-;
-; Destroys: AF, BC, DE, HL
-; ------------------------------------------------
-
-ClearScrollBand:
-    ld b,64
-    ld c,0
-    call GetScreenAddress
-
-    ld d,40             ; Number of pixel rows
-
-.rowLoop:
-    push hl
-    ld b,32             ; 32 bytes per screen row
-    xor a
-
-.byteLoop:
-    ld (hl),a
-    inc hl
-    djnz .byteLoop
-
-    pop hl
-    call NextPixelRow
-
-    dec d
-    jr nz,.rowLoop
-
-    ret
-
 FontBuffer:
     defs 768,0
 
@@ -1494,22 +787,13 @@ sineTable:
 
 SHIFTED_GLYPH_SIZE equ 128
 
-; Alignment makes GetSharedShiftedGlyph's page arithmetic possible.
+; Alignment makes the hot-path shared-glyph page arithmetic possible.
     align 256
 
-; Eight shifts * 16 bytes for each supported glyph. The old alias remains
-; temporarily for the unused stage-1 reference routines above.
+; Eight shifts * 16 bytes for each supported glyph.
 ShiftedFont:
-ShiftedMessageFont:
     defs FONT_GLYPH_COUNT * SHIFTED_GLYPH_SIZE,0
-
-FRAME_BUFFER_HEIGHT equ SCROLLER_HEIGHT
-FRAME_BUFFER_SIZE   equ 32 * FRAME_BUFFER_HEIGHT
 
 ; 64 little-endian screen offsets generated from sineTable at startup.
 SineScreenOffsetTable:
     defs 64 * 2,0
-
-; Linear rows corresponding to visible pixel rows 144-167.
-FrameBuffer:
-    defs FRAME_BUFFER_SIZE,0
