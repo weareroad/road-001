@@ -16,6 +16,9 @@ charY:
 scrollPos:
     dw 0
 
+messageIndex:
+    db 0
+
 message:
     db "HELLO FROM THE ZX SPECTRUM!   ",0
 
@@ -51,6 +54,7 @@ start:
     ldir
 
     call CopyAndThickenFont
+    call BuildShiftedMessageFont
 
  ; Initialise scroll position
     ld hl,0
@@ -232,6 +236,9 @@ EraseMessage:
 ; ------------------------------------------------
 
 DrawMessage:
+    xor a
+    ld (messageIndex),a
+
     ld hl,message
 
     ; Initial X = 256 - scrollPos
@@ -271,28 +278,26 @@ DrawMessage:
     push hl
     push de
 
-    ; GetSineY destroys HL, so preserve the character separately from
-    ; the message pointer before calculating its vertical position.
-    ld a,(hl)
-    push af
-
     ; Calculate Y from X
     ld a,e
     call GetSineY
     ld b,a
-
-    ; Restore the character while retaining Y in B.
-    pop af
 
     ; Restore X for drawing
     pop de
     push de
     ld c,e
 
-    ; Get character bitmap
-    call GetCharacterBitmap
+    ; Preserve the screen coordinates while looking up the prepared glyph.
+    push bc
+    ld a,c
+    and 7
+    ld c,a
+    ld a,(messageIndex)
+    call GetShiftedCharacter
+    pop bc
 
-    call DrawChar8
+    call DrawShiftedChar8
 
     ; Restore state
     pop de
@@ -300,6 +305,10 @@ DrawMessage:
 
 .advance:
     ; Next character, 8 pixels to the right
+    ld a,(messageIndex)
+    inc a
+    ld (messageIndex),a
+
     inc hl
 
     ld a,e
@@ -412,6 +421,186 @@ EraseChar8:
 
     djnz .eraloop
     ret
+
+; ------------------------------------------------
+; DrawShiftedChar8
+;
+; Draws one prepared 16-byte glyph. Each of its eight
+; rows contains a left byte followed by a right byte.
+;
+; In:        IX = prepared glyph, B = pixel Y, C = pixel X
+; Out:       none
+; Preserves: DE
+; Clobbers:  AF, BC, HL, IX
+; ------------------------------------------------
+
+    macro DRAW_PREPARED_SHIFTED_ROW rowOffset
+        ld a,(ix+rowOffset)
+        or (hl)
+        ld (hl),a
+        inc hl
+        ld a,(ix+rowOffset+1)
+        or (hl)
+        ld (hl),a
+        dec hl
+        call NextPixelRow
+    endm
+
+    macro DRAW_PREPARED_ALIGNED_ROW rowOffset
+        ld a,(ix+rowOffset)
+        or (hl)
+        ld (hl),a
+        call NextPixelRow
+    endm
+
+DrawShiftedChar8:
+    call GetScreenAddress
+
+    ; Select the one-byte or two-byte path once for the whole glyph.
+    ld a,c
+    and 7
+    jr z,.aligned
+
+    DRAW_PREPARED_SHIFTED_ROW 0
+    DRAW_PREPARED_SHIFTED_ROW 2
+    DRAW_PREPARED_SHIFTED_ROW 4
+    DRAW_PREPARED_SHIFTED_ROW 6
+    DRAW_PREPARED_SHIFTED_ROW 8
+    DRAW_PREPARED_SHIFTED_ROW 10
+    DRAW_PREPARED_SHIFTED_ROW 12
+    DRAW_PREPARED_SHIFTED_ROW 14
+    ret
+
+.aligned:
+    ; The aligned path also avoids writing beyond screen byte column 31.
+    DRAW_PREPARED_ALIGNED_ROW 0
+    DRAW_PREPARED_ALIGNED_ROW 2
+    DRAW_PREPARED_ALIGNED_ROW 4
+    DRAW_PREPARED_ALIGNED_ROW 6
+    DRAW_PREPARED_ALIGNED_ROW 8
+    DRAW_PREPARED_ALIGNED_ROW 10
+    DRAW_PREPARED_ALIGNED_ROW 12
+    DRAW_PREPARED_ALIGNED_ROW 14
+    ret
+
+; ------------------------------------------------
+; GetShiftedCharacter
+;
+; Locates one of eight prepared shifts for a message character.
+;
+; In:        A = message character index, C = shift (0-7)
+; Out:       IX = address of 16-byte prepared glyph
+; Preserves: DE
+; Clobbers:  AF, HL, IX
+; ------------------------------------------------
+
+GetShiftedCharacter:
+    push de
+
+    ld l,a
+    ld h,0
+
+    ; Each message character occupies 8 shifts * 16 bytes = 128 bytes.
+    add hl,hl
+    add hl,hl
+    add hl,hl
+    add hl,hl
+    add hl,hl
+    add hl,hl
+    add hl,hl
+
+    ld de,ShiftedMessageFont
+    add hl,de
+
+    ; Each horizontal shift occupies 16 bytes.
+    ld a,c
+    and 7
+    add a,a
+    add a,a
+    add a,a
+    add a,a
+    ld e,a
+    ld d,0
+    add hl,de
+
+    push hl
+    pop ix
+
+    pop de
+    ret
+
+; ------------------------------------------------
+; BuildShiftedMessageFont
+;
+; Generates eight prepared horizontal shifts for each
+; character occurrence in the message. Called once at startup.
+;
+; Clobbers: AF, BC, DE, HL, IX
+; ------------------------------------------------
+
+BuildShiftedMessageFont:
+    ld hl,message
+    ld de,ShiftedMessageFont
+
+.nextCharacter:
+    ld a,(hl)
+    or a
+    ret z
+
+    push hl             ; Message pointer
+    push de             ; Output pointer
+    call GetCharacterBitmap
+    pop de
+
+    ld c,0              ; Horizontal shift 0-7
+
+.nextShift:
+    push bc
+    push ix             ; Return to glyph row zero for every shift
+    ld b,8
+
+.nextRow:
+    ld a,(ix+0)
+    inc ix
+
+    ld h,a              ; H:L is the shifted 16-bit row
+    ld l,0
+
+    push bc
+    ld b,c
+
+.shiftRow:
+    ld a,b
+    or a
+    jr z,.rowReady
+
+    srl h
+    rr l
+    djnz .shiftRow
+
+.rowReady:
+    pop bc
+
+    ld a,h
+    ld (de),a
+    inc de
+    ld a,l
+    ld (de),a
+    inc de
+
+    djnz .nextRow
+
+    pop ix
+    pop bc
+
+    inc c
+    ld a,c
+    cp 8
+    jr nz,.nextShift
+
+    pop hl
+    inc hl
+    jr .nextCharacter
 
 ; ------------------------------------------------
 ; DrawChar8
@@ -655,3 +844,9 @@ sineTable:
     db -11,-12,-13,-14,-15,-15,-16,-16
     db -16,-16,-16,-15,-15,-14,-13,-12
     db -11,-10,-9,-8,-6,-5,-3,-2
+
+SHIFTED_GLYPH_SIZE equ 128
+
+; Eight shifts * 16 bytes for each character occurrence in the message.
+ShiftedMessageFont:
+    defs MESSAGE_LENGTH * SHIFTED_GLYPH_SIZE,0
