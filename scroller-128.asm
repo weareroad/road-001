@@ -2,9 +2,10 @@
     jp start
 
 ; Set to 1 to show frame-time phases in the border:
-;   yellow = clearing the off-screen frame buffer
-;   red    = rendering the message into the frame buffer
-;   cyan   = copying the completed buffer to the visible screen
+;   yellow  = clearing the hidden hardware-screen band
+;   red     = rendering the message into the hidden screen
+;   cyan    = flipping the completed hardware screen into view
+;   magenta = one PT3 audio replay tick
 ;   black  = waiting/remaining frame time
 PROFILE_BORDER equ 1
 
@@ -99,6 +100,10 @@ start:
     call BuildShiftedFont
     call BuildSineScreenOffsetTable
 
+    ; Initialize the PT3 player with the module stored in fixed bank 2.
+    ld hl,AudioModule
+    call PT3Player.VT_START+3
+
  ; Initialise scroll position
     ld hl,0
     ld (scrollPos),hl
@@ -146,6 +151,18 @@ mainLoop:
     di
     call WritePagingState
     ei
+
+    if PROFILE_BORDER
+        xor a
+        out ($fe),a
+    endif
+
+    if PROFILE_BORDER
+        ld a,3             ; Magenta: one 50 Hz PT3 replay tick
+        out ($fe),a
+    endif
+
+    call PT3Player.VT_START+5
 
     if PROFILE_BORDER
         xor a
@@ -797,3 +814,19 @@ ShiftedFont:
 ; 64 little-endian screen offsets generated from sineTable at startup.
 SineScreenOffsetTable:
     defs 64 * 2,0
+
+; Keep the third-party player in its own namespace: its original source uses
+; short global names such as START, PLAY and INIT that would otherwise collide
+; with demo labels. Code and writable state both remain in fixed bank 2.
+    module PT3Player
+        include "third_party/vt_sound/PT3PROM-sjasmplus.asm"
+    endmodule
+
+AudioModule:
+    incbin "just_say_no.pt3"
+AudioModuleEnd:
+
+AUDIO_MODULE_SIZE equ AudioModuleEnd-AudioModule
+
+; Leave at least 1 KB between persistent data and the downward-growing stack.
+    assert AudioModuleEnd < STACK_TOP-$0400
