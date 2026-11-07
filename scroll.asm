@@ -20,6 +20,9 @@ scrollPos:
 messageIndex:
     db 0
 
+savedStackPointer:
+    dw 0
+
 message:
     db "HELLO FROM THE ZX SPECTRUM!   ",0
 
@@ -56,6 +59,7 @@ start:
 
     call CopyAndThickenFont
     call BuildShiftedMessageFont
+    call BuildSineRowOffsetTable
 
  ; Initialise scroll position
     ld hl,0
@@ -343,14 +347,27 @@ DrawMessage:
 ; ------------------------------------------------
 
 DrawMessageToBuffer:
-    xor a
-    ld (messageIndex),a
-
     ld hl,256
     ld bc,(scrollPos)
     or a
     sbc hl,bc
     ex de,hl             ; DE = signed 16-bit starting X
+
+    ; Every character is eight pixels apart, so all characters have the
+    ; same horizontal shift. Point IX at shift zero's character block plus
+    ; this frame's one shared 16-byte shift offset.
+    ld a,e
+    and 7
+    add a,a
+    add a,a
+    add a,a
+    add a,a
+    ld l,a
+    ld h,0
+    ld bc,ShiftedMessageFont
+    add hl,bc
+    push hl
+    pop ix
 
     ld hl,message
 
@@ -373,21 +390,7 @@ DrawMessageToBuffer:
     push hl
     push de
 
-    ld a,e
-    call GetSineY
-    ld b,a
-
-    pop de
-    push de
     ld c,e
-
-    push bc
-    ld a,c
-    and 7
-    ld c,a
-    ld a,(messageIndex)
-    call GetShiftedCharacter
-    pop bc
 
     call DrawShiftedChar8ToBuffer
 
@@ -395,9 +398,9 @@ DrawMessageToBuffer:
     pop hl
 
 .advance:
-    ld a,(messageIndex)
-    inc a
-    ld (messageIndex),a
+    ; Move to the same prepared shift for the next message character.
+    ld bc,SHIFTED_GLYPH_SIZE
+    add ix,bc
 
     inc hl
 
@@ -514,27 +517,32 @@ EraseChar8:
     ret
 
 ; ------------------------------------------------
-; GetFrameBufferAddress
+; GetFrameBufferAddressForX
 ;
-; Converts screen coordinates into the 32-byte-wide linear buffer.
+; Converts an X coordinate directly to its sine-wave row in the
+; 32-byte-wide linear buffer.
 ;
-; In:        B = screen pixel Y (64-103), C = pixel X
+; In:        C = pixel X
 ; Out:       HL = buffer byte address
 ; Clobbers:  AF, DE, HL
 ; ------------------------------------------------
 
-GetFrameBufferAddress:
-    ld a,b
-    sub 64
+GetFrameBufferAddressForX:
+    ; The sine phase is (X / 2) MOD 64. Each table entry is a 16-bit
+    ; precomputed row offset, so double the phase for the lookup.
+    ld a,c
+    srl a
+    and 63
+    add a,a
     ld l,a
     ld h,0
+    ld de,SineRowOffsetTable
+    add hl,de
 
-    ; Relative row * 32.
-    add hl,hl
-    add hl,hl
-    add hl,hl
-    add hl,hl
-    add hl,hl
+    ld e,(hl)
+    inc hl
+    ld d,(hl)
+    ex de,hl             ; HL = precomputed row * 32
 
     ld a,c
     srl a
@@ -554,7 +562,7 @@ GetFrameBufferAddress:
         ld (hl),a
         inc hl
         ld a,(ix+rowOffset+1)
-        or (hl)
+        ; The right byte is untouched in a cleared, left-to-right render.
         ld (hl),a
         dec hl
         add hl,de
@@ -570,13 +578,13 @@ GetFrameBufferAddress:
 ; ------------------------------------------------
 ; DrawShiftedChar8ToBuffer
 ;
-; In:        IX = prepared glyph, B = screen Y, C = screen X
+; In:        IX = prepared glyph, C = screen X
 ; Out:       none
 ; Clobbers:  AF, DE, HL
 ; ------------------------------------------------
 
 DrawShiftedChar8ToBuffer:
-    call GetFrameBufferAddress
+    call GetFrameBufferAddressForX
     ld de,32             ; Distance between linear buffer rows
 
     ld a,c
@@ -606,16 +614,41 @@ DrawShiftedChar8ToBuffer:
 
 ; Clears all 40 * 32 bytes of the off-screen frame buffer.
 ClearFrameBuffer:
-    ld hl,FrameBuffer
-    ld de,FrameBuffer+1
-    ld bc,FRAME_BUFFER_SIZE-1
-    xor a
-    ld (hl),a
-    ldir
+    ; Use the stack as a fast 16-bit fill engine. Interrupts must remain
+    ; disabled while SP points into the buffer because an interrupt would
+    ; otherwise place its return address inside the image.
+    di
+    ld (savedStackPointer),sp
+    ld sp,FrameBuffer+FRAME_BUFFER_SIZE
+    ld hl,0
+
+    ; 128 iterations * 5 pushes * 2 bytes = 1,280 bytes.
+    ld b,128
+.clearLoop:
+    push hl
+    push hl
+    push hl
+    push hl
+    push hl
+    djnz .clearLoop
+
+    ld sp,(savedStackPointer)
+    ei
     ret
 
 ; Copies the 40 linear buffer rows to pixel rows 64-103 in the
 ; Spectrum's non-linear display file.
+    macro COPY_EIGHT_BYTES
+        ldi
+        ldi
+        ldi
+        ldi
+        ldi
+        ldi
+        ldi
+        ldi
+    endm
+
 CopyFrameBufferToScreen:
     ld hl,FrameBuffer
     ld de,$4800          ; Pixel row 64, byte column 0
@@ -625,8 +658,13 @@ CopyFrameBufferToScreen:
     push af
     push de
 
+    ; Unrolled LDI is 16 T-states per byte. LDIR would take 21 T-states
+    ; for every byte except the last one in each row.
     ld bc,32
-    ldir
+    COPY_EIGHT_BYTES
+    COPY_EIGHT_BYTES
+    COPY_EIGHT_BYTES
+    COPY_EIGHT_BYTES
 
     pop de              ; Restore the start of this screen row
     ex de,hl             ; HL = screen row, DE = next buffer row
@@ -817,6 +855,49 @@ BuildShiftedMessageFont:
     pop hl
     inc hl
     jr .nextCharacter
+
+; ------------------------------------------------
+; BuildSineRowOffsetTable
+;
+; Converts each signed sine value into a 16-bit offset for the linear
+; frame buffer: (16 + sine value) * 32. Called once at startup.
+;
+; Clobbers: AF, BC, DE, HL
+; ------------------------------------------------
+
+BuildSineRowOffsetTable:
+    ld hl,sineTable
+    ld de,SineRowOffsetTable
+    ld b,64
+
+.nextValue:
+    push bc
+
+    ld a,(hl)
+    add a,16
+
+    push hl
+    ld l,a
+    ld h,0
+    add hl,hl
+    add hl,hl
+    add hl,hl
+    add hl,hl
+    add hl,hl
+
+    ld a,l
+    ld (de),a
+    inc de
+    ld a,h
+    ld (de),a
+    inc de
+
+    pop hl
+    inc hl
+
+    pop bc
+    djnz .nextValue
+    ret
 
 ; ------------------------------------------------
 ; DrawChar8
@@ -1069,6 +1150,10 @@ ShiftedMessageFont:
 
 FRAME_BUFFER_HEIGHT equ 40
 FRAME_BUFFER_SIZE   equ 32 * FRAME_BUFFER_HEIGHT
+
+; 64 little-endian offsets generated from sineTable at startup.
+SineRowOffsetTable:
+    defs 64 * 2,0
 
 ; Linear rows corresponding to visible pixel rows 64-103.
 FrameBuffer:
