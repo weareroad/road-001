@@ -449,16 +449,46 @@ DrawChar8:
     ld d,a
     ld e,0
 
-    ld b,c              ; Horizontal shift count
-
-.shift:
-    ld a,b
+    ; Select an unrolled shift path. This avoids the loop-control cost of
+    ; shifting each row one bit at a time with DJNZ.
+    ld a,c
     or a
     jr z,.shiftDone
 
+    cp 4
+    jr c,.shift1to3
+
+    ; First four shifts for alignments 4-7.
     srl d
     rr e
-    djnz .shift
+    srl d
+    rr e
+    srl d
+    rr e
+    srl d
+    rr e
+
+    sub 4
+    jr z,.shiftDone
+
+.shift1to3:
+    dec a
+    jr z,.shiftOne
+
+    dec a
+    jr z,.shiftTwo
+
+    ; Third remaining shift.
+    srl d
+    rr e
+
+.shiftTwo:
+    srl d
+    rr e
+
+.shiftOne:
+    srl d
+    rr e
 
 .shiftDone:
     pop hl              ; Restore row start
