@@ -1,0 +1,1 @@
+C:\Users\rob\Documents\NextBuildv10\Emu\CSpect\cspect.exe -16bit -vsync -zxnext -mmc=C:\Users\rob\Documents\NextBuildv10\img\cspect-next-2gb.img

@@ -1,0 +1,9 @@
+# SjASMPlus build output
+*.sna
+*.bin
+*.tap
+*.tzx
+*.nex
+*.lst
+*.sym
+*.map
