@@ -7,7 +7,7 @@
 ;   cyan    = flipping the completed hardware screen into view
 ;   magenta = one PT3 audio replay tick
 ;   black  = waiting/remaining frame time
-PROFILE_BORDER equ 1
+PROFILE_BORDER equ 0
 
 PAGING_PORT          equ $7ffd
 PAGING_BANK_7        equ %00000111
@@ -15,6 +15,10 @@ PAGING_SHADOW_SCREEN equ %00001000
 PAGING_48K_ROM       equ %00010000
 PAGING_INITIAL       equ PAGING_48K_ROM|PAGING_BANK_7
 SYSTEM_BANKM         equ $5b5c
+
+ATTR_BRIGHT_RED   equ %01000010
+ATTR_BRIGHT_YELLOW equ %01000110
+ATTR_BRIGHT_BLUE  equ %01000001
 
 ; Keep the runtime stack in fixed bank 2 ($8000-$BFFF). The 128K machine
 ; pages different RAM banks into $C000-$FFFF, so the old $FF00 stack would
@@ -48,15 +52,26 @@ hiddenScreenBaseHigh:
     db $c0
 
 message:
-    ; Eight source lines of 32 characters form one continuous message.
-    db "WELCOME TO THE ZX SPECTRUM DEMO."
-    db "THIS IS A LONGER STAGE TWO TEXT."
-    db "THE FONT IS PRE-SHIFTED ONCE.   "
-    db "ONLY VISIBLE GLYPHS GET RENDERED"
-    db "QUOTES, COMMAS, FULL-STOPS...   "
-    db "QUESTIONS? YES! (BRACKETS) TOO. "
-    db "AT-SIGNS @ AND AMPERSANDS & WORK"
-    db "THANKS FOR WATCHING!            "
+    ; one continuous message.
+    db "HELLO....              "
+    db "IT'S THOSE CHAPS FROM "
+    db "WE-ARE-ROAD AGAIN.       "
+    db "THIS TIME WE "
+    db "BRING YOU OUR HIGHLY-DERIVATIVE "
+    db "128K SPECTRUM SCROLLER DEMO, THE "
+    db "FIRST IN A SERIES OF 'HOW DO WE "
+    db "DO THAT, THEN?' EXPERIMENTS.    "
+    db "CONSIDER YOURSELVES WARNED!     "
+    db "WE USED CHATGPT TO LEARN HOW TO "
+    db "OPTIMISE THE HELL OUT OF OUR BABY"
+    db "-STEPS Z80 CODE.                "
+    db "THE TUNE IS ADAM'S JUST-SAY-NO PT3 "
+    db "FROM OUR FORTHCOMING SPEC-NEXT GAME, "
+    db "PLAYGROUND PANIC. THE PT3 REPLAY ROUTINE "
+    db "IS FROM VORTEX TRACKER.         "
+    db "SEE YOU ON THE SPECTRUM NEXT IN THE "
+    db "(FAIRLY) NEAR FUTURE                      "
+    db "BYE!!                          "
     db 0
 
 messageEnd:
@@ -64,7 +79,12 @@ messageEnd:
 MESSAGE_LENGTH equ messageEnd-message-1
 MESSAGE_WIDTH  equ MESSAGE_LENGTH*8
 
-    assert MESSAGE_LENGTH <= 256
+    ; Message traversal is zero-terminated, so its length does not affect the
+    ; amount of rendering performed in one frame. The complete journey length
+    ; must fit in the 16-bit scrollPos counter. A separate assertion after the
+    ; audio module protects the fixed-bank stack from oversized source data.
+    assert MESSAGE_LENGTH > 0
+    assert 256+MESSAGE_WIDTH <= $ffff
 
 
 start:
@@ -72,41 +92,29 @@ start:
     ld sp,STACK_TOP
     ld iy,$5c3a           ; Spectrum ROM system-variable base
 
-    call Initialise128Paging
+    call FakeLoader.Run
 
     ; Black border.
     xor a
     out ($fe),a
 
-    ; Clear the 6144-byte bitmap
-    ld hl,$4000
-    ld de,$4001
-    ld bc,6143
-
-    xor a
-    ld (hl),a
-    ldir
-
-    ; White ink on black paper across the whole screen.
-    ld hl,$5800
-    ld de,$5801
-    ld bc,767
-    ld (hl),%00000111
-    ldir
-
-    call InitialiseShadowScreen
+    call InitialiseScreensFromAsset
 
     call CopyAndThickenFont
     call BuildShiftedFont
     call BuildSineScreenOffsetTable
 
+    call ClearScrollerAreas
+    call InitialiseScrollerAttributes
+
+    ; The display and all generated data are now ready. Start playback only
+    ; after completing every potentially visible initialization step.
+    ld hl,0
+    ld (scrollPos),hl
+
     ; Initialize the PT3 player with the module stored in fixed bank 2.
     ld hl,AudioModule
     call PT3Player.VT_START+3
-
- ; Initialise scroll position
-    ld hl,0
-    ld (scrollPos),hl
 
     im 1
     ei
@@ -184,15 +192,34 @@ mainLoop:
     jr mainLoop
 
 ; ------------------------------------------------
-; Initialise128Paging
+; InitialiseScreensFromAsset
 ;
-; Selects the known 48K ROM, maps RAM bank 7 at $C000 and displays the
-; normal bank-5 screen. Bit 5 remains clear so paging is not locked.
+; The linked 6912-byte .scr asset lives at $C000 in RAM bank 0. Copy it
+; into the normal display in bank 5, then duplicate it into the shadow
+; display in bank 7. This leaves bank 7 mapped and bank 5 displayed,
+; which is the initial state expected by the double-buffered scroller.
 ; ------------------------------------------------
 
-Initialise128Paging:
+InitialiseScreensFromAsset:
+    ; Map bank 0 at $C000 while continuing to display bank 5.
+    ld a,PAGING_48K_ROM
+    call WritePagingState
+
+    ld hl,ScreenAsset
+    ld de,$4000
+    ld bc,6912
+    ldir
+
+    ; Map bank 7 at $C000, still displaying bank 5.
     ld a,PAGING_INITIAL
-    jp WritePagingState
+    call WritePagingState
+
+    ; Bank 5 remains visible at $4000; bank 7 is now at $C000.
+    ld hl,$4000
+    ld de,$c000
+    ld bc,6912
+    ldir
+    ret
 
 ; ------------------------------------------------
 ; WritePagingState
@@ -213,23 +240,87 @@ WritePagingState:
     ret
 
 ; ------------------------------------------------
-; InitialiseShadowScreen
+; ClearScrollerAreas
 ;
-; Bank 7 is mapped at $C000 by Initialise128Paging. Initialize it to the
-; same black bitmap and white-on-black attributes as the normal screen.
+; Removes the asset's pixels from the complete 24-pixel-high scroller band
+; on both hardware screens. This means demo.scr does not need to contain a
+; perfectly blank lower section. Bank 5 is at $4000 and the mapped bank 7
+; shadow screen is at $C000.
 ; ------------------------------------------------
 
-InitialiseShadowScreen:
-    ld hl,$c000
-    ld de,$c001
-    ld bc,6143
+ClearScrollerAreas:
+    ld hl,$5040          ; Pixel row 144 in bank 5
+    call ClearScrollerArea
+
+    ld hl,$d040          ; Pixel row 144 in bank 7
+    jp ClearScrollerArea
+
+; In: HL = first bitmap byte of the scroller area
+; Clobbers: AF, BC, DE, HL
+ClearScrollerArea:
+    ld b,SCROLLER_HEIGHT
+
+.nextRow:
+    push bc
+    push hl
+
     ld (hl),0
+    ld d,h
+    ld e,l
+    inc de
+    ld bc,31
     ldir
 
-    ld hl,$d800
-    ld de,$d801
-    ld bc,767
-    ld (hl),%00000111
+    pop hl
+    call NextLowerThirdPixelRow
+    pop bc
+    djnz .nextRow
+    ret
+
+; ------------------------------------------------
+; InitialiseScrollerAttributes
+;
+; Installs three stationary colour stripes behind the scroller on both
+; hardware screens. Bitmap pixels adopt these colours as they pass through.
+; ------------------------------------------------
+
+InitialiseScrollerAttributes:
+    ; Normal screen, bank 5: attribute rows 18, 19 and 20.
+    ld hl,$5a40
+    ld a,ATTR_BRIGHT_RED
+    call FillAttributeRow
+
+    ld hl,$5a60
+    ld a,ATTR_BRIGHT_YELLOW
+    call FillAttributeRow
+
+    ld hl,$5a80
+    ld a,ATTR_BRIGHT_BLUE
+    call FillAttributeRow
+
+    ; Shadow screen, bank 7 mapped at $C000.
+    ld hl,$da40
+    ld a,ATTR_BRIGHT_RED
+    call FillAttributeRow
+
+    ld hl,$da60
+    ld a,ATTR_BRIGHT_YELLOW
+    call FillAttributeRow
+
+    ld hl,$da80
+    ld a,ATTR_BRIGHT_BLUE
+    call FillAttributeRow
+    ret
+
+; FillAttributeRow
+; In:        HL = first attribute byte, A = attribute value
+; Clobbers:  BC, DE, HL
+FillAttributeRow:
+    ld (hl),a
+    ld d,h
+    ld e,l
+    inc de
+    ld bc,31
     ldir
     ret
 

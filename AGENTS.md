@@ -2,87 +2,169 @@
 
 ## Project
 
-This repository is a learning project and demo for the ZX Spectrum family, written in Z80 assembly. The first target is a standard 48K ZX Spectrum. ZX Spectrum Next features will be introduced only after a small, reliable 48K baseline is understood and working.
+This repository is a learning project and demo for the ZX Spectrum family,
+written in Z80 assembly with SjASMPlus.
 
-The initial MVP is a smooth, steady sine-wave text scroller: a message moves from right to left while a gentle sine wave controls the vertical position of its characters.
+The project began with a standard 48K Spectrum sine-wave scroller. That
+baseline is complete and retained under `archive_artifacts/`. The active target
+is now a standard ZX Spectrum 128K, using its two hardware screens for smooth
+double buffering and its AY chip for PT3 music. ZX Spectrum Next features are
+out of scope until this 128K demo is complete, understood and presentable.
 
-The human developer is learning Z80 assembly. Explanations, clear register contracts, and small comprehensible changes are therefore part of the deliverable—not optional commentary.
+The active demo consists of:
 
-## Toolchain
+- a reusable fake ROM-style cassette-loading introduction;
+- a linked 6,912-byte `.scr` image copied into both hardware screens;
+- a one-pixel-per-frame sine-wave text scroller;
+- a thickened, startup-generated, horizontally pre-shifted ROM font;
+- fixed red/yellow/blue attributes behind the scroller;
+- hidden-screen clear/render followed by interrupt-synchronised screen flips;
+  and
+- 50 Hz PT3 playback through the 128K AY sound chip.
 
-- Assembler: `sjasmplus` (currently version 1.24.0; executable is on `PATH`)
-- Primary target: ZX Spectrum 48K
-- Emulators/debuggers: ZXSpin 0.7, Fuse, or CSpect
-- Later target: ZX Spectrum Next, primarily through CSpect
-- See `tools.md`, `run-demo.bat`, and `launchcspect.bat` for local tool locations and existing launch notes.
+The human developer is learning Z80 assembly. Clear explanations, accurate
+register contracts and comprehensible changes are part of the deliverable.
+This code is intended for eventual publication, so comments should teach why
+the implementation works rather than merely restate instructions.
 
-Prefer a reproducible command-line build. Generated binaries, symbols, listings, snapshots, or disk images should have clear names and should not be treated as source files.
+## Active toolchain
 
-## Existing material
+- Assembler: `sjasmplus` 1.24.0, available on `PATH`
+- Active target: standard ZX Spectrum 128K
+- Primary emulator: ZXSpin 0.7 in 128K mode
+- Secondary emulator: Fuse, with an important caveat: current Fuse versions
+  interpret every 128K `.sna` as Pentagon because SNA has no machine field
+- Future target: ZX Spectrum Next, primarily through CSpect
 
-- `scroller-handover.md` is the detailed history and technical handover. Read it before changing scroller code.
-- `scroll.asm` contains useful earlier work and the closest available reference for the original run-time-shifting renderer.
-- `later-scroll.asm` contains experiments and ideas, including an unfinished pre-shifted-font path. It is not a trusted baseline and is known not to work correctly.
+The reproducible active build is:
 
-The old files are evidence and reference material. Do not assume the project must continue from the most complicated version; a careful clean implementation is preferred.
+```text
+build.bat
+```
+
+It assembles `main.asm` and produces `demo-128.sna`. Do not treat generated
+snapshots, symbols, listings or maps as source files.
+
+## Active source and assets
+
+- `main.asm`: 128K device definition, component inclusion, screen asset in RAM
+  bank 0, memory assertions and snapshot output
+- `scroller-128.asm`: startup orchestration, paging, renderer, generated font
+  data, sine addressing, PT3 integration and frame loop
+- `loader.asm`: reusable fake cassette-loader component
+- `demo.scr`: replaceable 6,912-byte screen image
+- `just_say_no.pt3`: replaceable PT3 module
+- `third_party/vt_sound/`: third-party PT3 player and its licence
+- `README.md`: public-facing build, customization and architecture guide
+
+`archive_artifacts/` contains superseded experiments, snapshots, standalone
+test harnesses and the detailed historical handover. These files are useful
+for understanding the development journey but are not active build inputs.
+Do not restore or modify archived implementations unless explicitly asked.
 
 ## Working approach
 
-1. Establish the smallest working program and a one-command SjASMPlus build.
-2. Add one behaviour at a time: screen addressing, one glyph, arbitrary pixel alignment, multiple glyphs, horizontal scrolling, then sine displacement.
-3. Assemble after every meaningful change and run in an emulator whenever visual behaviour changes.
-4. Keep the simple correct renderer as a reference before attempting optimisations.
-5. Introduce Spectrum Next features only after the 48K MVP is stable and understood.
+1. Preserve the working active build before changing behaviour.
+2. Make one conceptually coherent change at a time.
+3. Assemble after every meaningful source change with `build.bat`.
+4. Ask for emulator verification when appearance, sound or timing changes.
+5. Keep profiling evidence separate from assumptions about cycle cost.
+6. Keep the standard 128K version clean; do not introduce Next-only features
+   into it.
+7. Preserve user changes to the message, screen image, PT3 module and project
+   name.
 
-Correctness and understanding come before speed. Avoid combining ports, redesigns, and optimisations in one change. Do not repair the experimental pre-shifted-font implementation in place unless explicitly asked; redesign and test it independently after the baseline works.
+Correctness, frame stability and understanding take priority over cleverness.
+Optimisations are welcome where required for the 50 Hz budget, but each one
+must be explained and checked against the same visible workload.
 
-## Assembly conventions
+## Assembly and documentation conventions
 
 - Use SjASMPlus syntax consistently.
-- Prefer descriptive global routine/data labels and scoped local labels for internal branches.
-- Avoid unexplained magic numbers; use named constants for addresses, dimensions, timings, and buffer sizes.
-- Comment why code is necessary, especially where Spectrum display layout or Z80 constraints make code non-obvious.
-- Keep data, mutable state, tables, buffers, and executable code clearly separated.
-- Make the memory map explicit and check that code, buffers, stack, screen memory, and system areas cannot overlap.
-- Do not rely accidentally on ROM contents or undocumented initial register values; document intentional dependencies such as the ROM font at `$3D00`.
+- Prefer descriptive global labels and scoped local labels.
+- Use named constants for addresses, sizes, colours, timings and bank values.
+- Keep executable code, mutable state, generated tables and static assets
+  distinguishable.
+- Make the memory map and paging assumptions explicit.
+- Document intentional ROM dependencies, including the font at `$3D00`.
+- Preserve third-party licence and attribution files.
+- Avoid non-ASCII punctuation in source comments and repository documentation
+  where it may render inconsistently in Windows tools.
 
-Every reusable routine should document its contract, for example:
+Every substantial reusable routine should document:
 
 ```asm
 ; RoutineName
-; In:        B = pixel Y, C = pixel X
-; Out:       HL = screen address
-; Preserves: DE, IX
-; Clobbers:  AF, BC, HL
+; Purpose:   Why this routine exists
+; In:        Register and memory inputs
+; Out:       Register and memory outputs
+; Preserves: Registers genuinely preserved on every path
+; Clobbers:  All other changed registers
 ```
 
-Preservation claims must hold on every path. Treat undocumented registers as clobbered.
+For optimized routines, also explain:
+
+- the straightforward operation being replaced;
+- why the faster representation or instruction sequence is valid;
+- table layout, alignment and indexing assumptions;
+- self-imposed constraints such as shared glyph shifts or clipped edges;
+- stack-pointer repurposing and why interrupts are disabled around it;
+- unrolled operations and the exact amount of data they process; and
+- what would need changing if dimensions or supported characters change.
+
+Do not claim register preservation unless every branch satisfies it. Treat
+undocumented registers as clobbered.
+
+## Current architecture invariants
+
+- Program, generated data, PT3 player/module and stack occupy fixed RAM bank 2
+  at `$8000-$BFFF`.
+- The downward-growing stack starts at `$BFFF`; assembly must retain at least
+  the asserted 1 KB clearance below it.
+- The startup `.scr` asset is linked into RAM bank 0 at `$C000`.
+- Hardware screen bank 5 is visible at `$4000`; bank 7 is mapped at `$C000`
+  for hidden-screen rendering.
+- Paging state is mirrored in both `pagingState` and ROM variable `BANKM`.
+- The display bitmap uses the Spectrum's non-linear row layout. Never replace
+  its row-transition routine with a linear increment.
+- The scroller envelope is pixel rows 144-167 inclusive. Startup deliberately
+  clears those rows on both screens and replaces attribute rows 18-20.
+- The message is zero-terminated. Only potentially visible glyphs are visited,
+  so message length should not change frame rendering cost.
+- The font supports ASCII 32 through 93. Generated shifted-font indexing and
+  page alignment depend on the declared character range and glyph size.
+- Frame rendering happens entirely on the hidden screen. The completed screen
+  is flipped into view only at the interrupt boundary.
+- `PROFILE_BORDER` must normally be zero for presentation builds.
 
 ## Spectrum-specific correctness
 
-- The 48K bitmap occupies `$4000-$57FF`; its pixel-row layout is non-linear.
-- Do not advance vertically with a simple linear address assumption. Use and test a dedicated next-pixel-row routine.
-- Pixel-aligned glyph drawing must be tested at shifts 0 through 7.
-- A shifted 8-pixel glyph may touch two bytes. Clip explicitly at the left and right screen edges and never allow a write past byte column 31.
-- Test vertical transitions around pixel rows 7/8, 63/64, and 127/128.
-- Keep frame updates synchronized deliberately (initially `HALT` is acceptable with normal 48K interrupts enabled).
-- Preserve the intended compositing rule. The reference implementation uses OR drawing; erasing or clearing must not damage neighbouring glyphs unexpectedly.
+- Test all eight horizontal pixel alignments.
+- A shifted eight-pixel glyph may touch two bytes; clip both display edges and
+  never write beyond byte column 31.
+- Verify vertical transitions around pixel rows 7/8, 63/64 and 127/128 when
+  changing generic screen-address code.
+- Keep interrupts disabled whenever the stack pointer is temporarily aimed at
+  screen memory for the unrolled clear.
+- Keep paging changes atomic with respect to interrupts.
+- Maintain identical static artwork and scroller attributes in banks 5 and 7,
+  or screen flipping will expose mismatched frames.
+- Do not claim exact timing from border colours alone. Use calculated cycles or
+  measured emulator/debugger data for numerical claims.
 
-## Verification
+## Verification and handoff
 
-For each change, report:
+For each source change, report:
 
-- the exact SjASMPlus build command and whether it succeeded;
-- which emulator or other check was used;
-- what was visually or mechanically verified;
-- any behaviour that remains unverified.
+- the exact build command and whether it completed without errors or warnings;
+- which checks were mechanical and which require emulator testing;
+- the expected visible or audible result; and
+- anything that remains unverified.
 
-When changing rendering, test at minimum a byte-aligned X position, all eight horizontal alignments, both screen edges, and a Spectrum display-row discontinuity. Compare exact bitmap bytes where practical, not only screenshots.
+For renderer changes, compare the same message and phase at byte alignment,
+all shifted alignments, both horizontal edges and the lower-third screen-row
+layout. For loader or PT3 changes, verify both visual timing and sound in an
+emulator; successful assembly alone is not sufficient.
 
-Border-colour timing is useful for qualitative profiling, but do not claim cycle counts without calculation or measurement. Optimise only after a stable reference exists, and compare identical workloads.
-
-## Scope discipline
-
-Keep the first MVP intentionally modest: one screen, one message, an 8-pixel-high font, steady right-to-left movement, and a gentle sine path. Avoid music, interrupts, custom Next hardware, elaborate build systems, and precomputed renderer optimisations until this loop works reliably.
-
-Never present experimental code as working. Clearly label assumptions and distinguish assembled, emulator-tested, and merely reasoned-about behaviour.
+Never present experimental code as emulator-verified. Clearly distinguish
+assembled, mechanically inspected and visually/audibly tested behaviour.
