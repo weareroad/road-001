@@ -8,6 +8,10 @@
 ;   black  = waiting/remaining frame time
 PROFILE_BORDER equ 1
 
+FONT_FIRST_CHAR  equ 32
+FONT_LAST_CHAR   equ 93
+FONT_GLYPH_COUNT equ FONT_LAST_CHAR-FONT_FIRST_CHAR+1
+
 charX:
     db 240
 
@@ -23,13 +27,27 @@ messageIndex:
 savedStackPointer:
     dw 0
 
+currentShiftOffset:
+    db 0
+
 message:
-    db "HELLO FROM THE ZX SPECTRUM!   ",0
+    ; Eight source lines of 32 characters form one continuous message.
+    db "WELCOME TO THE ZX SPECTRUM DEMO."
+    db "THIS IS A LONGER STAGE TWO TEXT."
+    db "THE FONT IS PRE-SHIFTED ONCE.   "
+    db "ONLY VISIBLE GLYPHS GET RENDERED"
+    db "QUOTES, COMMAS, FULL-STOPS...   "
+    db "QUESTIONS? YES! (BRACKETS) TOO. "
+    db "AT-SIGNS @ AND AMPERSANDS & WORK"
+    db "THANKS FOR WATCHING!            "
+    db 0
 
 messageEnd:
 
 MESSAGE_LENGTH equ messageEnd-message-1
 MESSAGE_WIDTH  equ MESSAGE_LENGTH*8
+
+    assert MESSAGE_LENGTH <= 256
 
 
 start:
@@ -58,7 +76,7 @@ start:
     ldir
 
     call CopyAndThickenFont
-    call BuildShiftedMessageFont
+    call BuildShiftedFont
     call BuildSineRowOffsetTable
 
  ; Initialise scroll position
@@ -347,49 +365,109 @@ DrawMessage:
 ; ------------------------------------------------
 
 DrawMessageToBuffer:
+    ; Work out whether the message has reached the left edge yet.
+    ld hl,(scrollPos)
+    ld de,256
+    or a
+    sbc hl,de             ; HL = scrollPos - 256
+    jr nc,.messageEntered
+
+    ; No characters have passed the left edge. Start at message[0] with
+    ; X = 256 - scrollPos.
     ld hl,256
     ld bc,(scrollPos)
     or a
     sbc hl,bc
-    ex de,hl             ; DE = signed 16-bit starting X
+    ex de,hl              ; DE = first character X
+    ld hl,message
+    jr .setSharedShift
 
-    ; Every character is eight pixels apart, so all characters have the
-    ; same horizontal shift. Point IX at shift zero's character block plus
-    ; this frame's one shared 16-byte shift offset.
+.messageEntered:
+    ; One whole character leaves the screen every eight pixels. Skip those
+    ; characters immediately instead of traversing the message from its
+    ; beginning on every frame.
+    ld a,l
+    and 7
+    push af               ; Remainder determines partial left-edge X
+
+    srl h
+    rr l
+    srl h
+    rr l
+    srl h
+    rr l                  ; HL = first potentially visible character index
+
+    ld bc,message
+    add hl,bc             ; HL = first potentially visible message byte
+
+    pop af
+    or a
+    jr z,.firstAtZero
+
+    neg
+    ld e,a
+    ld d,$ff              ; First character begins at X = -1 through -7
+    jr .setSharedShift
+
+.firstAtZero:
+    ld de,0
+
+.setSharedShift:
+    ; All message characters are eight pixels apart and therefore use the
+    ; same one of the eight prepared horizontal shifts in this frame.
     ld a,e
     and 7
     add a,a
     add a,a
     add a,a
     add a,a
-    ld l,a
-    ld h,0
-    ld bc,ShiftedMessageFont
-    add hl,bc
-    push hl
-    pop ix
-
-    ld hl,message
+    ld b,a                ; Keep the shared 0-112 shift offset in B
 
 .nextChar:
     ld a,(hl)
     or a
     ret z
 
+    ; A partially clipped character at the left edge is skipped. The next
+    ; character will begin at X = 1 through 7 and can be drawn completely.
     bit 7,d
     jr nz,.advance
 
+    ; Once X has reached 256, every remaining character is also off-screen.
     ld a,d
     or a
-    jr nz,.advance
+    ret nz
 
     ld a,e
     cp 249
-    jr nc,.advance
+    ret nc
 
     push hl
     push de
 
+    ; Fast shared-font lookup. Supported ASCII starts at 32; folding that
+    ; subtraction into the font page constant avoids SUB in the hot path.
+    ; Even glyphs begin at page offset $00, odd glyphs at $80.
+    ld a,(hl)
+    srl a                 ; Carry = odd/even; A = ASCII / 2
+    ld d,a
+    ld a,0
+    rra
+    ld e,a
+
+    ld a,d
+    add a,(ShiftedFont >> 8)-(FONT_FIRST_CHAR/2)
+    ld d,a
+
+    ld a,b
+    add a,e
+    ld e,a
+
+    push de
+    pop ix
+
+    pop de
+    push de
     ld c,e
 
     call DrawShiftedChar8ToBuffer
@@ -398,10 +476,6 @@ DrawMessageToBuffer:
     pop hl
 
 .advance:
-    ; Move to the same prepared shift for the next message character.
-    ld bc,SHIFTED_GLYPH_SIZE
-    add ix,bc
-
     inc hl
 
     ld a,e
@@ -411,6 +485,52 @@ DrawMessageToBuffer:
 
     inc d
     jr .nextChar
+
+; ------------------------------------------------
+; GetSharedShiftedGlyph
+;
+; Finds a prepared glyph in the 256-byte-aligned, glyph-major shared font.
+; Each glyph occupies 128 bytes; parity selects the low-byte half while
+; characterIndex / 2 selects the high byte. The frame's shared shift is a
+; 0-112 byte offset that never carries into the next page.
+;
+; In:        A = supported ASCII character
+; Out:       IX = address of its prepared 16-byte shifted glyph
+; Preserves: BC
+; Clobbers:  AF, DE, IX
+; ------------------------------------------------
+
+GetSharedShiftedGlyph:
+    ; Unsupported values display as spaces rather than indexing outside
+    ; the prepared font table.
+    cp FONT_FIRST_CHAR
+    jr c,.useSpace
+    cp FONT_LAST_CHAR+1
+    jr c,.supported
+
+.useSpace:
+    ld a,' '
+
+.supported:
+    sub FONT_FIRST_CHAR
+    srl a                 ; Carry = odd glyph index; A = index / 2
+    ld d,a
+
+    ld a,0                ; Convert carry into either $00 or $80
+    rra
+    ld e,a
+
+    ld a,d
+    add a,ShiftedFont >> 8
+    ld d,a
+
+    ld a,(currentShiftOffset)
+    add a,e
+    ld e,a
+
+    push de
+    pop ix
+    ret
 
 
 ; ------------------------------------------------
@@ -622,11 +742,9 @@ ClearFrameBuffer:
     ld sp,FrameBuffer+FRAME_BUFFER_SIZE
     ld hl,0
 
-    ; 128 iterations * 5 pushes * 2 bytes = 1,280 bytes.
-    ld b,128
+    ; 128 iterations * 3 pushes * 2 bytes = 768 bytes.
+    ld b,FRAME_BUFFER_SIZE/6
 .clearLoop:
-    push hl
-    push hl
     push hl
     push hl
     push hl
@@ -636,7 +754,7 @@ ClearFrameBuffer:
     ei
     ret
 
-; Copies the 40 linear buffer rows to pixel rows 64-103 in the
+; Copies the 24 linear buffer rows to pixel rows 72-95 in the
 ; Spectrum's non-linear display file.
     macro COPY_EIGHT_BYTES
         ldi
@@ -651,8 +769,8 @@ ClearFrameBuffer:
 
 CopyFrameBufferToScreen:
     ld hl,FrameBuffer
-    ld de,$4800          ; Pixel row 64, byte column 0
-    ld a,40
+    ld de,$4820          ; Pixel row 72, byte column 0
+    ld a,FRAME_BUFFER_HEIGHT
 
 .nextRow:
     push af
@@ -784,24 +902,20 @@ GetShiftedCharacter:
     ret
 
 ; ------------------------------------------------
-; BuildShiftedMessageFont
+; BuildShiftedFont
 ;
 ; Generates eight prepared horizontal shifts for each
-; character occurrence in the message. Called once at startup.
+; supported glyph. Called once at startup.
 ;
 ; Clobbers: AF, BC, DE, HL, IX
 ; ------------------------------------------------
 
-BuildShiftedMessageFont:
-    ld hl,message
-    ld de,ShiftedMessageFont
+BuildShiftedFont:
+    ld de,ShiftedFont
+    ld a,FONT_FIRST_CHAR
 
 .nextCharacter:
-    ld a,(hl)
-    or a
-    ret z
-
-    push hl             ; Message pointer
+    push af             ; ASCII character
     push de             ; Output pointer
     call GetCharacterBitmap
     pop de
@@ -852,15 +966,17 @@ BuildShiftedMessageFont:
     cp 8
     jr nz,.nextShift
 
-    pop hl
-    inc hl
-    jr .nextCharacter
+    pop af
+    inc a
+    cp FONT_LAST_CHAR+1
+    jr nz,.nextCharacter
+    ret
 
 ; ------------------------------------------------
 ; BuildSineRowOffsetTable
 ;
 ; Converts each signed sine value into a 16-bit offset for the linear
-; frame buffer: (16 + sine value) * 32. Called once at startup.
+; frame buffer: (8 + sine value) * 32. Called once at startup.
 ;
 ; Clobbers: AF, BC, DE, HL
 ; ------------------------------------------------
@@ -874,7 +990,7 @@ BuildSineRowOffsetTable:
     push bc
 
     ld a,(hl)
-    add a,16
+    add a,8              ; Buffer row = (80 + sine) - top row 72
 
     push hl
     ld l,a
@@ -1133,28 +1249,33 @@ FontBuffer:
 
 
 sineTable:
-    db 0,2,3,5,6,8,9,10
-    db 11,12,13,14,15,15,16,16
-    db 16,16,16,15,15,14,13,12
-    db 11,10,9,8,6,5,3,2
-    db 0,-2,-3,-5,-6,-8,-9,-10
-    db -11,-12,-13,-14,-15,-15,-16,-16
-    db -16,-16,-16,-15,-15,-14,-13,-12
-    db -11,-10,-9,-8,-6,-5,-3,-2
+    db 0,1,2,3,3,4,5,5
+    db 6,6,7,7,8,8,8,8
+    db 8,8,8,8,8,7,7,6
+    db 6,5,5,4,3,3,2,1
+    db 0,-1,-2,-3,-3,-4,-5,-5
+    db -6,-6,-7,-7,-8,-8,-8,-8
+    db -8,-8,-8,-8,-8,-7,-7,-6
+    db -6,-5,-5,-4,-3,-3,-2,-1
 
 SHIFTED_GLYPH_SIZE equ 128
 
-; Eight shifts * 16 bytes for each character occurrence in the message.
-ShiftedMessageFont:
-    defs MESSAGE_LENGTH * SHIFTED_GLYPH_SIZE,0
+; Alignment makes GetSharedShiftedGlyph's page arithmetic possible.
+    align 256
 
-FRAME_BUFFER_HEIGHT equ 40
+; Eight shifts * 16 bytes for each supported glyph. The old alias remains
+; temporarily for the unused stage-1 reference routines above.
+ShiftedFont:
+ShiftedMessageFont:
+    defs FONT_GLYPH_COUNT * SHIFTED_GLYPH_SIZE,0
+
+FRAME_BUFFER_HEIGHT equ 24
 FRAME_BUFFER_SIZE   equ 32 * FRAME_BUFFER_HEIGHT
 
 ; 64 little-endian offsets generated from sineTable at startup.
 SineRowOffsetTable:
     defs 64 * 2,0
 
-; Linear rows corresponding to visible pixel rows 64-103.
+; Linear rows corresponding to visible pixel rows 72-95.
 FrameBuffer:
     defs FRAME_BUFFER_SIZE,0
