@@ -5,6 +5,6 @@
 
     DEVICE ZXSPECTRUM48
 
-    INCLUDE "scroll.asm"
+    INCLUDE "scroller-stage2.asm"
 
     SAVESNA "demo.sna", start
